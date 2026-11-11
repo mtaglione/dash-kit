@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Dash Kit: GPT-Live delegation bench</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cg stroke-width='4' stroke-linecap='round'%3E%3Cpath d='M5 8v16' stroke='%232c5bd8'/%3E%3Cpath d='M11 4v24' stroke='%23596879'/%3E%3Cpath d='M17 10v12' stroke='%23923bb0'/%3E%3Cpath d='M23 6v20' stroke='%23b37a06'/%3E%3Cpath d='M29 12v8' stroke='%23127f6f'/%3E%3C/g%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      <span class="brand-name">Dash Kit</span>
+    </div>
+    <div class="call" id="call">
+      <span class="status" id="status" data-state="idle">Idle</span>
+      <span class="clock" id="clock" title="Call time, and voice seconds billed">—</span>
+      <span class="meters" aria-hidden="true">
+        <span class="meter" title="Your microphone"><span class="meter-name">You</span><span class="meter-track"><span id="meter-mic"></span></span></span>
+        <span class="meter" title="GPT-Live output"><span class="meter-name">Kit</span><span class="meter-track"><span id="meter-out"></span></span></span>
+      </span>
+    </div>
+    <div class="actions">
+      <button id="btn-connect" class="primary">Start call</button>
+      <button id="btn-hangup" hidden>Hang up</button>
+      <button id="btn-mute" hidden aria-pressed="false">Mute mic</button>
+      <button id="btn-play" hidden>Play audio</button>
+      <button id="btn-reset" class="quiet" title="Clear the thread, timeline and subagents">New run</button>
+      <a id="btn-export" class="quiet button" href="/api/export" download>Export log</a>
+    </div>
+  </header>
+
+  <nav class="tabs-mobile" aria-label="Panels">
+    <button data-show="left">Prompts</button>
+    <button data-show="center" class="active">Conversation</button>
+    <button data-show="right">Timeline</button>
+  </nav>
+
+  <main class="bench" id="bench" data-show="center">
+    <!-- Left: editable prompts and settings -->
+    <section class="panel left" aria-label="Prompts and settings">
+      <div class="seg" role="tablist" id="settings-tabs">
+        <button role="tab" data-tab="voice" aria-selected="true" class="lane-voice">Voice agent</button>
+        <button role="tab" data-tab="orchestrator" aria-selected="false" class="lane-orchestrator">Delegation agent</button>
+        <button role="tab" data-tab="subagents" aria-selected="false" class="lane-subagent">Subagents</button>
+      </div>
+
+      <form class="settings" data-section="voice" id="form-voice">
+        <label class="field grow">
+          <span class="field-name">GPT-Live instructions</span>
+          <textarea name="prompt" spellcheck="true" rows="18"></textarea>
+          <span class="hint">Sent as <code>instructions</code> when a call starts. Changes apply to the next call; use an instruction from the composer to steer a call in progress.</span>
+        </label>
+        <div class="row">
+          <label class="field"><span class="field-name">Voice</span><select name="voice"></select></label>
+          <label class="field"><span class="field-name">Acknowledgement delay (ms)</span><input name="ackDelayMs" type="number" min="0" max="800" step="50"></label>
+        </div>
+        <label class="check"><input type="checkbox" name="greeting.enabled"> Greet when the call starts</label>
+        <label class="field"><span class="field-name">Greeting</span><textarea name="greeting.text" rows="3"></textarea></label>
+        <label class="check"><input type="checkbox" name="suppressAck"> Cancel the automatic acknowledgement (empty silent context on each delegation)</label>
+        <div class="form-actions"><button type="submit" class="primary">Save voice agent</button><button type="button" class="quiet" data-reset>Restore defaults</button><a class="quiet small" href="/api/session-config" target="_blank" rel="noopener">View session config</a><span class="dirty" hidden>Unsaved changes</span></div>
+      </form>
+
+      <form class="settings" data-section="orchestrator" id="form-orchestrator" hidden>
+        <label class="field grow">
+          <span class="field-name">Orchestrator instructions</span>
+          <textarea name="prompt" spellcheck="true" rows="18"></textarea>
+          <span class="hint">The Responses model that reads each delegation and routes it with tools: start, message, or stop a subagent, or tell the voice something. Changes apply on its next turn.</span>
+        </label>
+        <div class="row">
+          <label class="field"><span class="field-name">Mode</span><select name="mode"><option value="agent">Orchestrator model routes</option><option value="direct">Direct: one subagent per delegation</option></select></label>
+          <label class="field"><span class="field-name">Results reach the voice</span><select name="resultRouting"><option value="auto">Automatically</option><option value="orchestrator">Through the orchestrator</option></select></label>
+        </div>
+        <div class="row">
+          <label class="field"><span class="field-name">Model</span><input name="model" list="models"></label>
+          <label class="field"><span class="field-name">Reasoning effort</span><select name="effort"></select></label>
+          <label class="field"><span class="field-name">Wait for transcript (ms)</span><input name="graceMs" type="number" min="0" max="5000" step="100"></label>
+        </div>
+        <div class="form-actions"><button type="submit" class="primary">Save delegation agent</button><button type="button" class="quiet" data-reset>Restore defaults</button><span class="dirty" hidden>Unsaved changes</span></div>
+      </form>
+
+      <form class="settings" data-section="subagents" id="form-subagents" hidden>
+        <label class="field grow">
+          <span class="field-name">Subagent instructions</span>
+          <textarea name="prompt" spellcheck="true" rows="14"></textarea>
+          <span class="hint">Each subagent is its own Responses conversation. Changes apply to subagents started after saving.</span>
+        </label>
+        <div class="row">
+          <label class="field"><span class="field-name">Engine</span><select name="engine"><option value="openai">OpenAI Responses</option><option value="mock">Mock (no cost)</option></select></label>
+          <label class="field"><span class="field-name">Model</span><input name="model" list="models"></label>
+          <label class="field"><span class="field-name">Reasoning effort</span><select name="effort"></select></label>
+        </div>
+        <label class="check"><input type="checkbox" name="webSearch"> Web search tool</label>
+        <label class="check"><input type="checkbox" name="progressToVoice"> Send progress to the voice as silent context</label>
+        <div class="row">
+          <label class="field"><span class="field-name">Progress interval (ms)</span><input name="progressIntervalMs" type="number" min="0" max="60000" step="500"></label>
+          <label class="field"><span class="field-name">Mock run length (ms)</span><input name="mockDurationMs" type="number" min="500" max="120000" step="500"></label>
+        </div>
+        <div class="form-actions"><button type="submit" class="primary">Save subagents</button><button type="button" class="quiet" data-reset>Restore defaults</button><span class="dirty" hidden>Unsaved changes</span></div>
+      </form>
+      <datalist id="models"></datalist>
+    </section>
+
+    <!-- Center: conversation thread and the composer -->
+    <section class="panel center" aria-label="Conversation">
+      <div class="thread" id="thread" aria-live="polite">
+        <div class="empty" id="thread-empty">
+          <p class="empty-title">Start a call and talk.</p>
+          <p>Your speech, Kit's replies, each delegation, the orchestrator's decisions and every subagent show up here in order. Ask for something that needs a lookup, like "what's the weather in Boston right now", to see a delegation.</p>
+          <p>No microphone handy? Send a typed request below; it goes straight to the orchestrator.</p>
+        </div>
+      </div>
+      <form class="composer" id="composer">
+        <div class="composer-modes seg" role="tablist">
+          <button type="button" role="tab" data-mode="inject" aria-selected="true">Send to GPT-Live</button>
+          <button type="button" role="tab" data-mode="typed" aria-selected="false">Typed request</button>
+        </div>
+        <div class="composer-body" data-mode="inject">
+          <div class="kinds" role="radiogroup" aria-label="Event type">
+            <label><input type="radio" name="kind" value="thinking" checked><span><b>Silent context</b><small>session.thinking.append</small></span></label>
+            <label><input type="radio" name="kind" value="commentary"><span><b>Spoken update</b><small>session.commentary.append</small></span></label>
+            <label><input type="radio" name="kind" value="instructions"><span><b>Instruction</b><small>session.instructions.append</small></span></label>
+          </div>
+          <div class="inject-row">
+            <label class="field slim"><span class="field-name">Delegation</span><select name="delegationId" id="delegation-select"><option value="">General session context</option><option value="latest">Latest delegation</option></select></label>
+            <div class="presets" id="presets"></div>
+          </div>
+          <div class="send-row">
+            <textarea name="content" rows="2" placeholder="Text for GPT-Live, as if the delegation agent sent it"></textarea>
+            <button type="submit" class="primary">Send</button>
+          </div>
+        </div>
+        <div class="composer-body" data-mode="typed" hidden>
+          <div class="send-row">
+            <textarea name="typed" rows="2" placeholder="Type a request for the orchestrator, as if you had said it"></textarea>
+            <button type="submit" class="primary">Send to orchestrator</button>
+          </div>
+          <label class="check"><input type="checkbox" name="mirror" checked> Also give GPT-Live the request as silent context</label>
+        </div>
+        <p class="composer-note" id="composer-note" role="status"></p>
+      </form>
+    </section>
+
+    <!-- Right: timeline as a sequence diagram -->
+    <section class="panel right" aria-label="Timeline">
+      <div class="timeline-head">
+        <div class="lanes-head" id="lanes-head"></div>
+        <div class="timeline-tools">
+          <label class="check small"><input type="checkbox" id="show-quiet"> Show usage and low-level events</label>
+          <label class="check small"><input type="checkbox" id="follow" checked> Follow</label>
+        </div>
+      </div>
+      <ol class="timeline" id="timeline"></ol>
+    </section>
+  </main>
+
+  <audio id="remote-audio" autoplay playsinline></audio>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+node_modules/
+.env
+data/
+scratch/
+e2e-output/
+.DS_Store

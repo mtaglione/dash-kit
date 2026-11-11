@@ -10,6 +10,7 @@
 data/
 e2e-output/
 scratch/
+local/
 *.log
 
 node_modules/

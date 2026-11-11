@@ -54,7 +54,7 @@ export function createApp({ client = new OpenAI({ maxRetries: 1 }), dataDir = jo
   const app = express();
   app.use(express.json({ limit: '256kb' }));
   // Same-origin check, as in the WebRTC quickstart: the page that calls the
-  // API must be served by this server (localhost or the tailnet name).
+  // API must be served by this server (a proxy in front must keep the Host header).
   const sameOrigin = req => { const origin = req.headers.origin; if (!origin) return true; try { return new URL(origin).host === req.headers.host; } catch { return false; } };
   app.use('/api', (req, res, next) => (req.method === 'GET' || sameOrigin(req) ? next() : res.status(403).json({ error: 'Unexpected request origin' })));
   app.use(express.static(join(root, 'public'), { index: 'index.html', extensions: ['html'] }));

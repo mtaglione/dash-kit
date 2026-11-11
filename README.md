@@ -11,7 +11,7 @@ Everything runs on the OpenAI platform with the project key in `.env`:
 | Orchestrator (delegation agent) | Responses API model (default `gpt-6-luna`) with four function tools |
 | Subagents | One Responses API conversation each (web search on), or a free mock engine |
 
-Built from OpenAI's GPT-Live documentation, not from the Boosker code:
+Built from OpenAI's GPT-Live documentation:
 
 - [Getting started](https://developers.openai.com/api/docs/guides/live)
 - [WebRTC quickstart](https://developers.openai.com/api/docs/guides/voice-webrtc?api=live): browser offer, `POST /v1/live/sessions`, `oai-events` data channel, graceful `session.close`
@@ -20,14 +20,13 @@ Built from OpenAI's GPT-Live documentation, not from the Boosker code:
 - [Managing sessions](https://developers.openai.com/api/docs/guides/live-conversations): config fields, greeting, transcripts, usage and close
 - [Prompting GPT-Live](https://developers.openai.com/api/docs/guides/live-prompting): prompt structure and the `<|SpawnThinking|>` delegation trigger
 
-## Use it
+## Run it
 
-- Mac: http://127.0.0.1:4520/
-- Phone (tailnet only, HTTPS so the mic works): https://mikes-mac-mini.tail045cfd.ts.net:8452/
+1. `npm install`
+2. `cp .env.example .env` and set `OPENAI_API_KEY` to a project key with GPT-Live access.
+3. `npm start`, then open http://localhost:4520/
 
-A LaunchAgent (`com.miketaglione.dash-kit`) keeps the server running. `scripts/install-launchagent.sh` installs or restarts it and adds the Tailscale route; `scripts/install-launchagent.sh remove` takes both down.
-
-To run it by hand instead: `npm install`, then `PORT=4520 node server.mjs`.
+Browsers only allow the microphone on HTTPS or localhost. To use it from another device, put an HTTPS reverse proxy in front that keeps the `Host` header. `PORT` and `HOST` in `.env` change where the server listens (default `127.0.0.1:4520`).
 
 ## The screen
 

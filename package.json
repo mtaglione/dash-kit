@@ -1,5 +1,5 @@
 {
-  "name": "livekit-dash-kit-testing",
+  "name": "dash-kit",
   "private": true,
   "type": "module",
   "description": "GPT-Live client-delegation sandbox: talk over WebRTC, watch the voice model, orchestrator, and subagents on one dashboard.",

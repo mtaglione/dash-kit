@@ -1,4 +1,4 @@
-# LiveKit Dash Kit Testing
+# Dash Kit
 
 A test bench for GPT-Live client delegation. You talk to GPT-Live in the browser over WebRTC, and one screen shows everything that happens: your speech, the voice model's replies, each delegation, the orchestrator's decisions, every subagent, and every event sent back to GPT-Live.
 

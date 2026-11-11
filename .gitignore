@@ -1,6 +1,16 @@
-node_modules/
+# Secrets: the OpenAI key lives in .env (copy .env.example to start)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Local data: settings, call logs with transcripts, test recordings
 data/
-scratch/
 e2e-output/
+scratch/
+*.log
+
+node_modules/
 .DS_Store

@@ -31,6 +31,8 @@ cat > $PLIST <<PLISTEOF
 </dict></plist>
 PLISTEOF
 launchctl bootout gui/$(id -u)/$LABEL 2>/dev/null || true
+# bootout returns before the old service is gone; bootstrap fails (error 5) until it is.
+for i in {1..20}; do launchctl print gui/$(id -u)/$LABEL >/dev/null 2>&1 || break; sleep 0.5; done
 launchctl bootstrap gui/$(id -u) $PLIST
 tailscale serve --bg --https=$TS_PORT http://127.0.0.1:4520 >/dev/null
 HOSTNAME=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')

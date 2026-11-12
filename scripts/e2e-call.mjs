@@ -28,7 +28,7 @@ const step = async (name, fn) => { const t = Date.now(); await fn(); console.log
 let failed = false;
 try {
   await page.goto(base);
-  await step('dashboard loaded', () => page.waitForSelector('#lanes-head span.voice'));
+  await step('dashboard loaded', () => page.waitForSelector('#btn-connect'));
   await page.click('#btn-connect');
   await step('call live (session.started on the data channel)', () => page.waitForSelector('#status[data-state="live"]', { timeout: 30000 }));
   await step('user speech transcribed', () => page.waitForSelector('.turn.user', { timeout: 30000 }));

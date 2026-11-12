@@ -2,7 +2,7 @@
 
 A test bench for GPT-Live client delegation. You talk to GPT-Live in the browser over WebRTC, and one screen shows everything that happens: your speech, the voice model's replies, each delegation, the orchestrator's decisions, every subagent, and every event sent back to GPT-Live.
 
-Everything runs on the OpenAI platform with the project key in `.env`:
+Everything runs on one provider, chosen in `.env`: the OpenAI platform with a project key, or an Azure AI Foundry resource with its endpoint and key.
 
 | Part | What runs it |
 | --- | --- |
@@ -23,20 +23,32 @@ Built from OpenAI's GPT-Live documentation:
 ## Run it
 
 1. `npm install`
-2. `cp .env.example .env` and set `OPENAI_API_KEY` to a project key with GPT-Live access.
+2. `cp .env.example .env` and set the provider:
+   - OpenAI: `OPENAI_API_KEY`, a project key with GPT-Live access.
+   - Azure AI Foundry: `FOUNDRY_ENDPOINT` and `FOUNDRY_API_KEY`. With both set, the voice session, the orchestrator and the subagents all run on that resource and the OpenAI key is not used. The resource needs a `gpt-live-1` deployment. Set `BACKEND_MODELS` to the deployment names the orchestrator and subagents may use (the first is the default); a saved model outside that list is replaced by the first one.
 3. `npm start`, then open http://localhost:4520/
 
 Browsers only allow the microphone on HTTPS or localhost. To use it from another device, put an HTTPS reverse proxy in front that keeps the `Host` header. `PORT` and `HOST` in `.env` change where the server listens (default `127.0.0.1:4520`).
 
 ## The screen
 
-- **Left: prompts.** Voice agent (GPT-Live `instructions`, voice, greeting, acknowledgement delay), delegation agent (orchestrator prompt, model, effort, routing), subagents (prompt, engine, model, web search, progress). Voice changes apply to the next call (GPT-Live fixes `instructions` at startup). Orchestrator and subagent changes apply on their next turn.
+- **Left: prompts.** Voice agent (GPT-Live `instructions`, voice, greeting, acknowledgement delay, hang up after silence), delegation agent (orchestrator prompt, model, effort, routing), subagents (prompt, engine, model, web search, progress). Voice changes apply to the next call (GPT-Live fixes `instructions` at startup). Orchestrator and subagent changes apply on their next turn.
 - **Center: conversation.** Speech turns, delegation rows, orchestrator steps, subagent cards with live progress and a Stop button, and every append to GPT-Live with its acknowledgement time.
-- **Right: timeline.** A sequence diagram with five lanes (You, App, GPT-Live, Orchestrator, Subagents); one arrow per event. Click a row for the raw event.
+- **Right: timeline**, in two views:
+  - **Overlay** (default). One track per call, drawn to scale on the call's own clock, with time running down. Three things share that clock: speech (a block per transcript turn, in a "You" and a "Kit" lane), audio (the level each side actually had, as a strip beside its lane), and messages (every delegation, append, typed request, orchestrator step and subagent result, as a marker at the moment it landed, with a line across the speech lanes). Orchestrator turns and subagent runs are bars beside the markers. A stretch with no speech, sound or messages is folded and labelled with its length. Tap anything for its exact times and what was being said when it landed. Zoom changes the scale.
+  - **Sequence.** A sequence diagram with five lanes (You, App, GPT-Live, Orchestrator, Subagents); one arrow per event, in order, on the run clock. Click a row for the raw event.
 - **Composer.** Send a `session.thinking.append` (silent context), `session.commentary.append` (spoken update) or `session.instructions.append` (instruction) as if the delegation agent sent it, for the latest delegation, a chosen one, or as general session context. Presets cover cancelling the acknowledgement, fake results, quiet progress, and "stop talking". The "Typed request" tab sends text straight to the orchestrator.
 - **Top bar.** Start call / Hang up, sideband mic mute (`session.input_audio.mute`), level meters, billed seconds, New run, Export log.
 
 Each run is also saved to `data/runs/<run>.jsonl`. Settings are saved in `data/settings.json`.
+
+## Idle hang-up
+
+A connected call is billed for every second, whether or not anyone speaks. The server closes a call after "Hang up after silence" minutes (default 5) with no speech from either side, no delegation and nothing sent to the voice. It never closes a call while the orchestrator or a subagent is working; the limit starts again when the work ends. Set it to 0 to turn it off. The setting is read while a call runs, so a change applies at once.
+
+## How the overlay keeps one clock
+
+GPT-Live reports speech, delegations and accepted appends on the session's own timeline (`start_ms`, `end_ms`, `offset_ms`), so those are placed exactly. Events that only have a wall-clock time (orchestrator steps, subagent progress, typed requests, audio levels) are placed through the append acknowledgements, each of which gives both clocks for the same moment. Audio levels are measured in the browser that is on the call (the loudest reading per 200 ms for the microphone and for GPT-Live's output) and sent to the server as `client.audio.levels` events, so they are in the run log and show up for anyone watching. A call with no append acknowledged yet is placed from the time the session was created.
 
 ## How a delegation flows
 
@@ -45,7 +57,26 @@ Each run is also saved to `data/runs/<run>.jsonl`. Settings are saved in `data/s
 3. The orchestrator calls `start_subagent`, `message_subagent`, `stop_subagent`, or `tell_voice`.
 4. Subagent progress goes to GPT-Live as silent context (rate-limited); the result goes as a spoken update with the original `delegation_id`. With routing set to "Through the orchestrator", the result goes to the orchestrator instead and it decides what GPT-Live hears.
 
+## Boosker mode
+
+With a Boosker checkout on the same machine, a call can run through the Boosker broker's own code instead of Dash Kit's orchestrator and subagents. A browser call then behaves like a call from the phone, and a change to the broker can be tried here before it is deployed.
+
+Turn it on in the **Boosker** tab on the left. The server looks for the checkout in `BOOSKER_DIR`, or in a `Boosker` folder beside this one.
+
+| Part | In Boosker mode |
+| --- | --- |
+| Voice prompt | The app's default agent prompt (read from `Shared/AgentProfile.swift`), then the delegation paragraph the broker adds. Both are editable in the tab. |
+| Call handling | The broker's `AgentCall` (`backend/live-agent.mjs`), unchanged: the wait for captions, which speech becomes the request, the stop and status phrases, progress to the voice, the spoken-length limit, session names. |
+| Routing | The broker's dispatcher (`backend/dispatcher.mjs`), a real `claude` process. Its prompt is editable in the tab. |
+| Workers | Real Claude sessions through the Boosker session host, and real one-shot lookups. They do real work on this machine, with the permissions a phone call has, and keep running after a hang-up. |
+
+The handler shares Dash Kit's sideband, so every message it sends to GPT-Live appears in the thread and the timeline with its acknowledgement time, marked with the session it came from. Dispatcher turns show what the dispatcher was given and its answer; each session and lookup gets a card (`s1`, `s2`… are the dispatcher's own names; `l1`… are lookups). A typed request takes the path a spoken one takes.
+
+A text edited in the tab is used for test calls only and is marked "edited here"; a text left alone keeps following the Boosker folder. Broker code is read when this server starts, so restart it after changing the Boosker folder. The server needs the `claude` program on its `PATH`, or `CLAUDE_BIN` set.
+
+Not covered: file cards on the phone, the Watch audio path, and the question list. An agent prompt edited on the phone is stored only there; paste it into the tab to test it.
+
 ## Tests
 
-- `npm test`: unit and integration tests with a fake sideband and scripted Responses client (no API cost).
+- `npm test`: unit and integration tests with a fake sideband and scripted Responses client (no API cost). When a Boosker checkout sits beside this folder, one test runs the real Boosker call handler through the shared sideband.
 - `node scripts/e2e-call.mjs`: a real call. Headless Chromium plays a synthesized spoken request as its microphone ("look up the current weather in Boston"), and the script waits for the delegation, the subagent result, the spoken reply, two composer presets, and `session.closed`. Costs about 25 voice seconds plus a few backend calls.

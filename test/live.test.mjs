@@ -76,3 +76,62 @@ test('long content is split; session.closed finishes the call and later appends 
   call.append('commentary', 'late');
   assert.equal(bus.history.at(-1).type, 'append.skipped');
 });
+
+// Idle cutoff.
+const idleCall = ({ minutes = 5, isBusy = () => false } = {}) => {
+  const settings = defaultSettings();
+  settings.voice.idleCloseMin = minutes;
+  const clock = { at: 1_000_000 };
+  const bus = new Bus();
+  const call = new LiveCall({ client: {}, sessionId: 'live_idle', bus, settings: () => settings, Sideband: FakeSideband, now: () => clock.at, isBusy, idleCheckMs: 0 }).connect();
+  call.ws.server({ type: 'session.started', event_id: 's1' });
+  return { call, bus, ws: call.ws, clock, settings };
+};
+const closesSent = ws => ws.sent.filter(payload => payload.type === 'session.close').length;
+
+test('a call with no speech is closed after the idle limit, and says why', () => {
+  const { call, ws, bus, clock } = idleCall();
+  clock.at += 4 * 60000 + 59000;
+  assert.equal(call.checkIdle(), false);
+  assert.equal(closesSent(ws), 0);
+  clock.at += 2000;
+  assert.equal(call.checkIdle(), true);
+  assert.equal(closesSent(ws), 1);
+  assert.match(bus.history.find(e => e.type === 'idle').label, /No speech for 5 min/);
+  assert.equal(call.checkIdle(), false, 'a call that is closing is not closed twice');
+  assert.equal(closesSent(ws), 1);
+});
+
+test('speech from either side, a delegation, or an append restarts the idle limit', () => {
+  const { call, ws, clock } = idleCall();
+  const wait = () => { clock.at += 4 * 60000; return call.checkIdle(); };
+  assert.equal(wait(), false);
+  ws.server({ type: 'session.input_transcript.delta', event_id: 'u1', delta: 'hello', start_ms: 0, end_ms: 300 });
+  assert.equal(wait(), false);
+  ws.server({ type: 'session.output_transcript.delta', event_id: 'a1', delta: 'hi', start_ms: 400, end_ms: 600 });
+  assert.equal(wait(), false);
+  ws.server({ type: 'session.delegation.created', event_id: 'd1', offset_ms: 700, delegation: { id: 'del_1', target: 'client' } });
+  assert.equal(wait(), false);
+  call.append('commentary', 'Here is the result.');
+  assert.equal(wait(), false);
+  assert.equal(wait(), true);
+});
+
+test('a call is not closed while backend work is running, and the limit starts again when it ends', () => {
+  let busy = true;
+  const { call, clock } = idleCall({ isBusy: () => busy });
+  clock.at += 20 * 60000;
+  assert.equal(call.checkIdle(), false);
+  busy = false;
+  clock.at += 4 * 60000;
+  assert.equal(call.checkIdle(), false);
+  clock.at += 2 * 60000;
+  assert.equal(call.checkIdle(), true);
+});
+
+test('an idle limit of 0 turns the cutoff off', () => {
+  const { call, ws, clock } = idleCall({ minutes: 0 });
+  clock.at += 119 * 60000;
+  assert.equal(call.checkIdle(), false);
+  assert.equal(closesSent(ws), 0);
+});

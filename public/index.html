@@ -18,6 +18,7 @@
     </div>
     <div class="call" id="call">
       <span class="status" id="status" data-state="idle">Idle</span>
+      <span class="mode-chip" id="mode-chip" hidden title="Calls run through the Boosker broker: real dispatcher, real Claude sessions">Boosker mode</span>
       <span class="clock" id="clock" title="Call time, and voice seconds billed">—</span>
       <span class="meters" aria-hidden="true">
         <span class="meter" title="Your microphone"><span class="meter-name">You</span><span class="meter-track"><span id="meter-mic"></span></span></span>
@@ -47,6 +48,7 @@
         <button role="tab" data-tab="voice" aria-selected="true" class="lane-voice">Voice agent</button>
         <button role="tab" data-tab="orchestrator" aria-selected="false" class="lane-orchestrator">Delegation agent</button>
         <button role="tab" data-tab="subagents" aria-selected="false" class="lane-subagent">Subagents</button>
+        <button role="tab" data-tab="boosker" aria-selected="false" class="lane-orchestrator">Boosker</button>
       </div>
 
       <form class="settings" data-section="voice" id="form-voice">
@@ -58,7 +60,9 @@
         <div class="row">
           <label class="field"><span class="field-name">Voice</span><select name="voice"></select></label>
           <label class="field"><span class="field-name">Acknowledgement delay (ms)</span><input name="ackDelayMs" type="number" min="0" max="800" step="50"></label>
+          <label class="field"><span class="field-name">Hang up after silence (min)</span><input name="idleCloseMin" type="number" min="0" max="120" step="1"></label>
         </div>
+        <span class="hint">The call is closed after this many minutes with no speech and no backend work, because a connected call is billed by the second. 0 never hangs up. Applies to a call in progress.</span>
         <label class="check"><input type="checkbox" name="greeting.enabled"> Greet when the call starts</label>
         <label class="field"><span class="field-name">Greeting</span><textarea name="greeting.text" rows="3"></textarea></label>
         <label class="check"><input type="checkbox" name="suppressAck"> Cancel the automatic acknowledgement (empty silent context on each delegation)</label>
@@ -90,7 +94,7 @@
           <span class="hint">Each subagent is its own Responses conversation. Changes apply to subagents started after saving.</span>
         </label>
         <div class="row">
-          <label class="field"><span class="field-name">Engine</span><select name="engine"><option value="openai">OpenAI Responses</option><option value="mock">Mock (no cost)</option></select></label>
+          <label class="field"><span class="field-name">Engine</span><select name="engine"><option value="openai">Responses API</option><option value="mock">Mock (no cost)</option></select></label>
           <label class="field"><span class="field-name">Model</span><input name="model" list="models"></label>
           <label class="field"><span class="field-name">Reasoning effort</span><select name="effort"></select></label>
         </div>
@@ -101,6 +105,31 @@
           <label class="field"><span class="field-name">Mock run length (ms)</span><input name="mockDurationMs" type="number" min="500" max="120000" step="500"></label>
         </div>
         <div class="form-actions"><button type="submit" class="primary">Save subagents</button><button type="button" class="quiet" data-reset>Restore defaults</button><span class="dirty" hidden>Unsaved changes</span></div>
+      </form>
+      <form class="settings" data-section="boosker" id="form-boosker" hidden>
+        <label class="check"><input type="checkbox" name="enabled"> Run calls through the Boosker broker</label>
+        <span class="hint" id="boosker-source">Boosker mode is not set up on this server.</span>
+        <span class="hint">When on, a call uses the three texts below, Boosker's real dispatcher and real Claude sessions on this computer (they do real work, with the same permissions as a phone call). Voice, greeting, acknowledgement and hang-up settings still come from the Voice agent tab; its prompt, the Delegation agent and the Subagents tabs are not used. Changes apply to the next call.</span>
+        <label class="field grow">
+          <span class="field-name">Voice prompt <em class="differs" data-differs="voicePrompt" hidden>edited here</em></span>
+          <textarea name="voicePrompt" spellcheck="true" rows="14"></textarea>
+          <span class="hint">The agent prompt the phone sends when a call starts. This is the app's default for a new agent; an agent edited on the phone has its own text, which is stored only on the phone. Paste it here to test it.</span>
+        </label>
+        <label class="field">
+          <span class="field-name">Delegation paragraph <em class="differs" data-differs="delegationParagraph" hidden>edited here</em></span>
+          <textarea name="delegationParagraph" spellcheck="true" rows="7"></textarea>
+          <span class="hint">The broker adds this after the voice prompt on every call.</span>
+        </label>
+        <label class="field">
+          <span class="field-name">Dispatcher prompt <em class="differs" data-differs="dispatcherPrompt" hidden>edited here</em></span>
+          <textarea name="dispatcherPrompt" spellcheck="true" rows="14"></textarea>
+          <span class="hint">The dispatcher reads each delegated request and answers with actions: start a session, send to one, stop one, run a lookup, or say something.</span>
+        </label>
+        <div class="row">
+          <label class="field"><span class="field-name">Wait for transcript (ms)</span><input name="graceMs" type="number" min="0" max="5000" step="100"></label>
+        </div>
+        <span class="hint">An edit here is used for test calls only. To make it Boosker's, change the Boosker code and deploy it. Other broker rules (progress every 3 s, the 1200-character spoken limit, stop and status phrases) are read from the Boosker folder when this server starts.</span>
+        <div class="form-actions"><button type="submit" class="primary">Save Boosker mode</button><button type="button" class="quiet" data-reset>Reload from the Boosker folder</button><span class="dirty" hidden>Unsaved changes</span></div>
       </form>
       <datalist id="models"></datalist>
     </section>
@@ -145,16 +174,28 @@
       </form>
     </section>
 
-    <!-- Right: timeline as a sequence diagram -->
-    <section class="panel right" aria-label="Timeline">
+    <!-- Right: the timeline, as the overlay (one clock) or the sequence diagram -->
+    <section class="panel right" aria-label="Timeline" data-view="overlay">
       <div class="timeline-head">
-        <div class="lanes-head" id="lanes-head"></div>
-        <div class="timeline-tools">
-          <label class="check small"><input type="checkbox" id="show-quiet"> Show usage and low-level events</label>
-          <label class="check small"><input type="checkbox" id="follow" checked> Follow</label>
+        <div class="timeline-top">
+          <div class="seg view-seg" role="tablist" id="timeline-views" aria-label="Timeline view">
+            <button type="button" role="tab" data-view="overlay" aria-selected="true" title="Speech, audio and messages on the call clock">Overlay</button>
+            <button type="button" role="tab" data-view="sequence" aria-selected="false" title="One arrow per event, in order">Sequence</button>
+          </div>
+          <div class="timeline-tools">
+            <span class="zoom ov-only"><button type="button" class="quiet" data-zoom="-1" aria-label="Zoom out">−</button><span>Zoom</span><button type="button" class="quiet" data-zoom="1" aria-label="Zoom in">+</button></span>
+            <label class="check small seq-only"><input type="checkbox" id="show-quiet"> Show usage and low-level events</label>
+            <label class="check small"><input type="checkbox" id="follow" checked> Follow</label>
+          </div>
         </div>
+        <div class="lanes-head seq-only" id="lanes-head"></div>
+        <div class="ov-head ov-only" aria-hidden="true"><span>Clock</span><span class="user">You</span><span class="voice">Kit</span><span>Messages to GPT-Live</span></div>
       </div>
-      <ol class="timeline" id="timeline"></ol>
+      <ol class="timeline seq-only" id="timeline"></ol>
+      <div class="overlay ov-only" id="overlay">
+        <div class="ov-scroll" id="ov-scroll"></div>
+        <aside class="ov-detail" id="ov-detail" hidden></aside>
+      </div>
     </section>
   </main>
 

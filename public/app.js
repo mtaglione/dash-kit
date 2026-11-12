@@ -1,6 +1,9 @@
 // Dash Kit browser client: the WebRTC call (per OpenAI's GPT-Live WebRTC
-// quickstart), the settings forms, the composer, and the two views drawn
-// from the server's event stream: the conversation thread and the timeline.
+// quickstart), the settings forms, the composer, and the views drawn from the
+// server's event stream: the conversation thread, and a timeline shown either
+// as the overlay (speech, audio and messages on one clock; overlay.js) or as
+// the sequence diagram.
+import { createOverlay } from './overlay.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const el = (tag, attrs = {}, ...children) => {
@@ -30,6 +33,9 @@ const rowNodes = new Map();      // event key -> timeline row
 const appendNodes = new Map();   // append event id -> thread step
 const agentCards = new Map();    // subagent id -> card
 const eventsBySeq = new Map();
+const LIVE_STATES = ['attaching', 'live', 'closing'];
+const overlay = createOverlay({ scroll: $('#ov-scroll'), detail: $('#ov-detail'), follow: () => $('#follow').checked,
+  isLive: id => serverState?.call?.sessionId === id && LIVE_STATES.includes(serverState.call.state), rawEvent: seq => eventsBySeq.get(seq) });
 
 /* ---------------- Server event stream ---------------- */
 let socket, socketRetry = 500;
@@ -38,7 +44,12 @@ function connectSocket() {
   socket.addEventListener('open', () => { socketRetry = 500; });
   socket.addEventListener('message', ({ data }) => {
     const message = JSON.parse(data);
-    if (message.type === 'hello') { resetViews(); applyState(message.state, { force: true }); for (const event of message.history) handleEvent(event); }
+    if (message.type === 'hello') {
+      resetViews(); applyState(message.state, { force: true });
+      for (const event of message.history) handleEvent(event);
+      // The cards are built from the history, so their status is set after it.
+      for (const agent of message.state.subagents ?? []) updateAgentCard(agent);
+    }
     else if (message.type === 'event') handleEvent(message.event);
     else if (message.type === 'state') applyState(message.state);
   });
@@ -58,6 +69,7 @@ function resetViews() {
   view.thread.replaceChildren($('#thread-empty') ?? emptyState());
   $('#thread-empty').hidden = false;
   view.timeline.replaceChildren();
+  overlay.reset();
   for (const map of [turnNodes, rowNodes, appendNodes, agentCards, eventsBySeq]) map.clear();
 }
 function emptyState() { return document.getElementById('thread-empty'); }
@@ -66,6 +78,7 @@ function handleEvent(event) {
   eventsBySeq.set(event.seq, event);
   renderThread(event);
   renderTimeline(event);
+  overlay.handle(event);
 }
 
 /* ---------------- State: settings, call, subagents ---------------- */
@@ -83,7 +96,24 @@ function applyState(state, { force = false } = {}) {
     ...delegations.slice().reverse().map(d => el('option', { value: d.id, text: `Delegation …${d.id.slice(-6)} at ${(d.offsetMs / 1000).toFixed(1)}s` })));
   select.value = [...select.options].some(o => o.value === chosen) ? chosen : '';
   for (const agent of state.subagents ?? []) updateAgentCard(agent);
-  if (!state.keyConfigured) note('The server has no OPENAI_API_KEY. Add it to .env and restart.', true);
+  showBoosker(state);
+  if (!state.keyConfigured) note(`The server has no ${state.missingKey ?? 'API key'}. Add it to .env and restart.`, true);
+}
+// Boosker mode: where its code came from, whether it can run, and which of its
+// texts were edited here (and so differ from the Boosker folder).
+function showBoosker(state) {
+  const info = state.boosker ?? { available: false, reason: 'Boosker mode is not set up on this server.' };
+  const on = Boolean(state.settings.boosker?.enabled);
+  $('#mode-chip').hidden = !on;
+  $('#mode-chip').classList.toggle('error', on && !info.available);
+  $('#boosker-source').textContent = info.available
+    ? `Broker code: ${info.dir}${info.version ? ` (${info.version})` : ''}. Dispatcher ${info.models.dispatcher} (${info.models.dispatcherEffort}); sessions ${info.models.worker} (${info.models.workerEffort}).${info.voicePromptNote ? ' ' + info.voicePromptNote : ''}`
+    : info.reason;
+  const form = $('#form-boosker');
+  for (const mark of $$('[data-differs]', form)) {
+    const field = form.elements[mark.dataset.differs];
+    mark.hidden = !info.defaults || field.value === info.defaults[mark.dataset.differs];
+  }
 }
 function fillOptions(options) {
   if (!options) return;
@@ -113,7 +143,7 @@ function readForm(form) {
 function setDirty(form, dirty) { form.dataset.dirty = dirty ? '1' : ''; if (!dirty) delete form.dataset.dirty; $('.dirty', form).hidden = !dirty; }
 
 for (const form of $$('form.settings')) {
-  form.addEventListener('input', () => setDirty(form, true));
+  form.addEventListener('input', () => { setDirty(form, true); if (form.dataset.section === 'boosker' && serverState) showBoosker(serverState); });
   form.addEventListener('submit', async event => {
     event.preventDefault();
     const section = form.dataset.section;
@@ -124,7 +154,8 @@ for (const form of $$('form.settings')) {
     } catch (error) { note(error.message, true); }
   });
   $('[data-reset]', form).addEventListener('click', async () => {
-    if (!confirm('Restore the default settings for this section? Your edits here are replaced.')) return;
+    const boosker = form.dataset.section === 'boosker';
+    if (!confirm(boosker ? 'Reload the three texts from the Boosker folder? Your edits here are replaced.' : 'Restore the default settings for this section? Your edits here are replaced.')) return;
     try { const saved = await api('/api/settings/reset', { section: form.dataset.section }); fillForm(form, saved[form.dataset.section]); note('Defaults restored.'); }
     catch (error) { note(error.message, true); }
   });
@@ -139,6 +170,7 @@ for (const button of $$('.tabs-mobile button')) {
   button.addEventListener('click', () => {
     $('#bench').dataset.show = button.dataset.show;
     for (const other of $$('.tabs-mobile button')) other.classList.toggle('active', other === button);
+    if (button.dataset.show === 'right') overlay.refresh();
   });
 }
 
@@ -266,7 +298,7 @@ function updateAgentCard(agent) {
 /* ---------------- Timeline (sequence diagram) ---------------- */
 $('#lanes-head').replaceChildren(el('span', { text: '' }), ...LANES.map(lane => el('span', { class: lane, text: LANE_NAME[lane] })));
 function renderTimeline(e) {
-  if (e.ephemeral) return;
+  if (e.ephemeral || e.type === 'client.audio.levels') return;   // levels are drawn in the overlay
   const quiet = e.quiet || QUIET_TYPES.has(e.type) || e.type.startsWith('client.dc.') ;
   let row = e.key ? rowNodes.get(e.key) : null;
   const label = e.type === 'transcript' ? `${e.role === 'user' ? 'You' : 'Kit'}: ${e.text.trim()}` : e.label ?? e.type;
@@ -296,6 +328,17 @@ function toggleDetail(row) {
 view.timeline.addEventListener('click', event => { const row = event.target.closest('.ev'); if (row && !event.target.closest('.ev-detail')) toggleDetail(row); });
 view.timeline.addEventListener('keydown', event => { if ((event.key === 'Enter' || event.key === ' ') && event.target.classList.contains('ev')) { event.preventDefault(); toggleDetail(event.target); } });
 $('#show-quiet').addEventListener('change', event => view.timeline.classList.toggle('show-quiet', event.target.checked));
+
+/* Timeline views: the overlay (default) or the sequence diagram. */
+function showTimelineView(name) {
+  $('.panel.right').dataset.view = name;
+  for (const tab of $$('#timeline-views [role=tab]')) tab.setAttribute('aria-selected', String(tab.dataset.view === name));
+  localStorage.setItem('dashkit.timeline.view', name);
+  if (name === 'overlay') overlay.refresh(); else if ($('#follow').checked) view.timeline.scrollTop = view.timeline.scrollHeight;
+}
+for (const tab of $$('#timeline-views [role=tab]')) tab.addEventListener('click', () => showTimelineView(tab.dataset.view));
+showTimelineView(localStorage.getItem('dashkit.timeline.view') === 'sequence' ? 'sequence' : 'overlay');
+for (const button of $$('[data-zoom]')) button.addEventListener('click', () => overlay.zoom(Number(button.dataset.zoom)));
 
 /* ---------------- Composer ---------------- */
 const composer = $('#composer');
@@ -342,7 +385,7 @@ $('#presets').replaceChildren(...PRESETS.map(preset => el('button', { type: 'but
 
 /* ---------------- The call: WebRTC to GPT-Live ---------------- */
 const audio = $('#remote-audio');
-const call = { peer: null, events: null, microphone: null, closeTimer: null, ready: false, finalized: false, startedAt: 0, muted: false };
+const call = { peer: null, events: null, microphone: null, closeTimer: null, ready: false, finalized: false, startedAt: 0, muted: false, sessionId: null };
 let audioContext = null, meters = [];
 
 function setStatus(state, text) { const node = $('#status'); node.dataset.state = state; node.textContent = text; }
@@ -411,7 +454,8 @@ function iceGathered(connection) {
 function onChannelEvent(event) {
   switch (event.type) {
     case 'session.started':
-      call.ready = true; call.startedAt = Date.now();
+      call.ready = true; call.startedAt = Date.now(); call.sessionId = event.session?.id ?? null;
+      levels.mic = []; levels.out = []; levels.peak = { mic: 0, out: 0 }; levels.bucketAt = call.startedAt; levels.firstAt = call.startedAt;
       setButtons('live'); setStatus('live', 'Live');
       clientEvent('session.started', `Data channel: session.started (${shortId(event.session?.id)})`, { sessionId: event.session?.id }, { from: 'voice', to: 'client' });
       break;
@@ -440,6 +484,7 @@ function hangUp() {
 }
 function cleanup() {
   clearTimeout(call.closeTimer);
+  sendLevels();
   call.microphone?.getTracks().forEach(track => track.stop());
   const events = call.events; call.events = null; events?.close();
   call.peer?.close(); call.peer = null;
@@ -455,15 +500,39 @@ function addMeter(stream, bar) {
   try {
     const analyser = audioContext.createAnalyser(); analyser.fftSize = 512;
     audioContext.createMediaStreamSource(stream).connect(analyser);
-    meters.push({ analyser, bar, data: new Uint8Array(analyser.fftSize) });
+    meters.push({ analyser, bar, data: new Uint8Array(analyser.fftSize), side: bar.id === 'meter-mic' ? 'mic' : 'out' });
   } catch { /* meters are optional */ }
 }
-(function drawMeters() {
-  for (const meter of meters) {
-    meter.analyser.getByteTimeDomainData(meter.data);
-    let sum = 0; for (const v of meter.data) { const x = (v - 128) / 128; sum += x * x; }
-    meter.bar.style.width = `${Math.min(100, Math.sqrt(sum / meter.data.length) * 320)}%`;
+function meterLevel(meter) {
+  meter.analyser.getByteTimeDomainData(meter.data);
+  let sum = 0; for (const v of meter.data) { const x = (v - 128) / 128; sum += x * x; }
+  return Math.min(100, Math.sqrt(sum / meter.data.length) * 320);
+}
+// Audio levels for the overlay. Each side's loudest reading per LEVEL_STEP is
+// kept, and a batch goes to the server every LEVEL_BATCH readings as a
+// client.audio.levels event, timed from this call's session.started. A batch
+// with no sound on either side is not sent.
+const LEVEL_STEP = 200, LEVEL_BATCH = 10;
+const levels = { mic: [], out: [], peak: { mic: 0, out: 0 }, bucketAt: 0, firstAt: 0 };
+function sendLevels() {
+  if (levels.mic.length && call.sessionId && [...levels.mic, ...levels.out].some(v => v >= 3)) {
+    clientEvent('audio.levels', 'Audio levels', { sessionId: call.sessionId, t: levels.firstAt - call.startedAt, step: LEVEL_STEP, mic: levels.mic, out: levels.out }, { quiet: true });
   }
+  levels.mic = []; levels.out = []; levels.firstAt = levels.bucketAt;
+}
+setInterval(() => {
+  if (!call.ready) return;
+  for (const meter of meters) levels.peak[meter.side] = Math.max(levels.peak[meter.side], meterLevel(meter));
+  const now = Date.now();
+  while (now - levels.bucketAt >= LEVEL_STEP) {
+    if (!levels.mic.length) levels.firstAt = levels.bucketAt;
+    levels.mic.push(Math.round(levels.peak.mic)); levels.out.push(Math.round(levels.peak.out));
+    levels.peak = { mic: 0, out: 0 }; levels.bucketAt += LEVEL_STEP;
+    if (levels.mic.length >= LEVEL_BATCH) sendLevels();
+  }
+}, 50);
+(function drawMeters() {
+  for (const meter of meters) meter.bar.style.width = `${meterLevel(meter)}%`;
   const clock = $('#clock');
   if (call.ready) {
     const s = Math.floor((Date.now() - call.startedAt) / 1000);

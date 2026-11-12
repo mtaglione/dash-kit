@@ -3,30 +3,57 @@
 // attaches a sideband, runs the orchestrator and subagents, and streams every
 // event to the dashboard over /ws.
 import express from 'express';
-import OpenAI from 'openai';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Bus } from './lib/bus.mjs';
-import { SettingsStore, VOICES, BACKEND_MODELS, EFFORTS } from './lib/config.mjs';
+import { SettingsStore, VOICES, EFFORTS } from './lib/config.mjs';
 import { LiveCall, createLiveSession, buildSessionConfig, APPEND_KINDS, short } from './lib/live.mjs';
 import { SubagentPool } from './lib/subagents.mjs';
 import { Orchestrator } from './lib/orchestrator.mjs';
+import { resolveProvider, createClient } from './lib/provider.mjs';
+import { loadBoosker, booskerInfo, BooskerBridge } from './lib/boosker.mjs';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 
 const root = dirname(fileURLToPath(import.meta.url));
 if (existsSync(join(root, '.env'))) process.loadEnvFile(join(root, '.env'));
 const PORT = Number(process.env.PORT ?? 4520);
 const HOST = process.env.HOST ?? '127.0.0.1';
 
-export function createApp({ client = new OpenAI({ maxRetries: 1 }), dataDir = join(root, 'data'), Sideband, createSession = createLiveSession } = {}) {
+// `boosker` is the Boosker broker code loaded by loadBoosker (or null): with it,
+// a call can run through that code instead of Dash Kit's own orchestrator.
+// `booskerHost` is its Claude session client; one is made on first use.
+// `reposRoot` is where a session starts when no repository folder is chosen:
+// the folder that holds the Boosker checkout, as on the broker.
+export function createApp({ provider = resolveProvider(), client = createClient(provider), dataDir = join(root, 'data'), Sideband = provider.Sideband, createSession = createLiveSession,
+  boosker = null, booskerHost = null, reposRoot = process.env.BOOSKER_REPOS_ROOT ?? (boosker?.dir ? dirname(boosker.dir) : homedir()) } = {}) {
   const bus = new Bus({ logDir: join(dataDir, 'runs') });
-  const store = new SettingsStore(join(dataDir, 'settings.json'));
+  const store = new SettingsStore(join(dataDir, 'settings.json'), { boosker: boosker?.available ? boosker.defaults : {} });
   const settings = () => store.get();
+  // With BACKEND_MODELS set, only those models (Foundry deployments) can run.
+  // A saved or default model outside the list is replaced by the first one.
+  const fitModels = () => {
+    if (!provider.exactModels) return;
+    const patch = {};
+    for (const section of ['orchestrator', 'subagents']) {
+      const model = settings()[section].model;
+      if (provider.models.includes(model)) continue;
+      patch[section] = { model: provider.models[0] };
+      bus.publish({ type: 'settings', from: 'system', to: 'system', label: `${section} model ${model} is not available on ${provider.label}; using ${provider.models[0]}` });
+    }
+    if (Object.keys(patch).length) store.update(patch);
+  };
+  fitModels();
   const pool = new SubagentPool({ client, settings });
   let call = null;
   let greeted = false;
+  // The Boosker handler of the current or the last call. It is kept after the
+  // call ends so its session cards stay up, and replaced by the next call.
+  let bridge = null;
+  const dropBridge = () => { bridge?.dispose(); bridge = null; };
 
   // Sends to GPT-Live when a call is up; otherwise records that nothing was sent.
   const voice = (kind, content, delegationId, meta = {}) => {
@@ -45,10 +72,11 @@ export function createApp({ client = new OpenAI({ maxRetries: 1 }), dataDir = jo
 
   const state = () => ({
     runId: bus.runId, runStartedAt: bus.runStartedAt, settings: settings(),
-    call: call ? call.status() : null, orchestratorBusy: orchestrator.busy,
-    subagents: pool.list().map(a => a.summary()),
-    options: { voices: VOICES, models: BACKEND_MODELS, efforts: EFFORTS, appendKinds: APPEND_KINDS },
-    keyConfigured: Boolean(process.env.OPENAI_API_KEY)
+    call: call ? call.status() : null, orchestratorBusy: bridge ? bridge.busy() : orchestrator.busy,
+    subagents: bridge ? bridge.summaries() : pool.list().map(a => a.summary()),
+    boosker: { ...booskerInfo(boosker), active: Boolean(bridge && !bridge.closed) },
+    options: { voices: VOICES, models: provider.models, efforts: EFFORTS, appendKinds: APPEND_KINDS },
+    provider: provider.label, keyConfigured: !provider.missing, missingKey: provider.missing
   });
 
   const app = express();
@@ -74,26 +102,33 @@ export function createApp({ client = new OpenAI({ maxRetries: 1 }), dataDir = jo
   app.put('/api/settings', wrap((req, res) => {
     const before = settings();
     const next = store.update(req.body ?? {});
-    const changed = ['voice', 'orchestrator', 'subagents'].filter(section => JSON.stringify(before[section]) !== JSON.stringify(next[section]));
-    if (changed.length) bus.publish({ type: 'settings', from: 'client', to: 'system', label: `Settings saved: ${changed.join(', ')}` + (changed.includes('voice') && call && !call.closed ? ' (voice changes apply to the next call)' : '') });
+    const changed = ['voice', 'orchestrator', 'subagents', 'boosker'].filter(section => JSON.stringify(before[section]) !== JSON.stringify(next[section]));
+    if (changed.length) bus.publish({ type: 'settings', from: 'client', to: 'system', label: `Settings saved: ${changed.join(', ')}` + ((changed.includes('voice') || changed.includes('boosker')) && call && !call.closed ? ' (voice and Boosker changes apply to the next call)' : '') });
     broadcastState();
     res.json(next);
   }));
   app.post('/api/settings/reset', wrap((req, res) => {
     const section = req.body?.section;
-    if (section && !['voice', 'orchestrator', 'subagents'].includes(section)) throw Object.assign(new Error('Unknown section'), { status: 400 });
-    const next = store.reset(section);
+    if (section && !['voice', 'orchestrator', 'subagents', 'boosker'].includes(section)) throw Object.assign(new Error('Unknown section'), { status: 400 });
+    store.reset(section);
     bus.publish({ type: 'settings', from: 'client', to: 'system', label: `Settings reset to defaults: ${section ?? 'all'}` });
+    fitModels();
     broadcastState();
-    res.json(next);
+    res.json(settings());
   }));
 
   app.post('/api/session', wrap(async (req, res) => {
     const sdp = req.body?.sdp;
     if (typeof sdp !== 'string' || !sdp.startsWith('v=0')) throw Object.assign(new Error('An SDP offer is required'), { status: 400 });
-    if (!process.env.OPENAI_API_KEY) throw Object.assign(new Error('Set OPENAI_API_KEY in .env'), { status: 503 });
+    if (provider.missing) throw Object.assign(new Error(`Set ${provider.missing} in .env`), { status: 503 });
+    const useBoosker = settings().boosker.enabled;
+    if (useBoosker) {
+      if (!boosker?.available) throw Object.assign(new Error(`Boosker mode is on, but its code is not loaded. ${booskerInfo(boosker).reason}`), { status: 409 });
+      const b = settings().boosker;
+      if (!b.voicePrompt.trim() || !b.dispatcherPrompt.trim()) throw Object.assign(new Error('Boosker mode needs a voice prompt and a dispatcher prompt. Open the Boosker tab.'), { status: 400 });
+    }
     if (call && !call.closed) { bus.publish({ type: 'command', from: 'system', to: 'voice', label: 'New call requested; closing the previous one' }); call.close(); }
-    bus.publish({ type: 'session.create', from: 'client', to: 'voice', label: `POST /v1/live/sessions (gpt-live-1, voice ${settings().voice.voice})`, data: { session: buildSessionConfig(settings()) } });
+    bus.publish({ type: 'session.create', from: 'client', to: 'voice', label: `POST /v1/live/sessions (gpt-live-1, voice ${settings().voice.voice}${useBoosker ? ', Boosker mode' : ''})`, data: { session: buildSessionConfig(settings()) } });
     let result;
     try { result = await createSession(client, settings(), sdp); }
     catch (error) {
@@ -102,10 +137,21 @@ export function createApp({ client = new OpenAI({ maxRetries: 1 }), dataDir = jo
     }
     const sessionId = result.session.id;
     greeted = false;
-    const live = new LiveCall({ client, sessionId, bus, settings, ...(Sideband ? { Sideband } : {}) });
+    const live = new LiveCall({ client, sessionId, bus, settings, ...(Sideband ? { Sideband } : {}), isBusy: () => (bridge && !bridge.closed ? bridge.busy() : orchestrator.busy || pool.running().length > 0) });
     call = live;
+    dropBridge();
     live.on('started', () => greet(live));
-    live.on('delegation', d => setTimeout(() => { orchestrator.handleDelegation(d, live.transcript); }, settings().orchestrator.graceMs));
+    if (useBoosker) {
+      // The Boosker handler reads the same sideband and takes every delegation;
+      // Dash Kit's own orchestrator and subagents stay out of this call.
+      booskerHost ??= new boosker.ClaudeHost({ cwd: reposRoot });
+      const handler = bridge = new BooskerBridge({ boosker, host: booskerHost, live, bus, settings, dataDir });
+      handler.on('change', broadcastState);
+      live.on('closed', () => handler.close());
+      bus.publish({ type: 'boosker', from: 'system', to: 'orchestrator', sessionId,
+        label: `Boosker mode: broker code from ${boosker.dir}${boosker.version ? ` (${boosker.version})` : ''}; dispatcher ${boosker.models.dispatcher}, sessions ${boosker.models.worker} ${boosker.models.workerEffort}` });
+      handler.start().catch(error => bus.publish({ type: 'orchestrator.error', from: 'orchestrator', sessionId, label: `Boosker handler could not start: ${error.message}` }));
+    } else live.on('delegation', d => setTimeout(() => { orchestrator.handleDelegation(d, live.transcript); }, settings().orchestrator.graceMs));
     live.on('usage', () => broadcastState());
     live.on('closed', () => broadcastState());
     live.connect();
@@ -131,13 +177,25 @@ export function createApp({ client = new OpenAI({ maxRetries: 1 }), dataDir = jo
   app.post('/api/request', wrap((req, res) => {
     const text = String(req.body?.text ?? '').trim();
     if (!text || text.length > 4000) throw Object.assign(new Error('Enter a request of 1 to 4000 characters'), { status: 400 });
+    // Boosker has no typed input; here the text takes the path a spoken request
+    // takes, and the voice hears of it only through what the broker sends back.
+    const viaBoosker = bridge && !bridge.closed;
+    if (settings().boosker.enabled && !viaBoosker) throw Object.assign(new Error('Boosker mode handles requests during a call. Start a call first.'), { status: 409 });
     bus.publish({ type: 'typed', from: 'user', to: 'orchestrator', label: `Typed request: ${text}`, text });
     if (req.body?.mirror && call && !call.closed) call.append('thinking', `The user typed this request instead of saying it: ${text}`, null, { origin: 'client', reason: 'typed input' });
-    orchestrator.handleTyped(text);
+    if (viaBoosker) bridge.typed(text).catch(error => bus.publish({ type: 'orchestrator.error', from: 'orchestrator', label: `Typed request failed: ${error.message}` }));
+    else orchestrator.handleTyped(text);
     res.json({ ok: true });
   }));
   app.post('/api/mute', wrap((req, res) => { requireCall().setMuted(Boolean(req.body?.muted)); res.json({ ok: true }); }));
-  app.post('/api/subagents/:id/stop', wrap((req, res) => {
+  app.post('/api/subagents/:id/stop', wrap(async (req, res) => {
+    if (bridge) {
+      bus.publish({ type: 'command', from: 'client', to: 'subagent', sub: req.params.id, label: `Stop ${req.params.id} (dashboard)` });
+      const stopped = await bridge.stop(req.params.id);
+      if (!stopped) throw Object.assign(new Error('That session cannot be stopped from here (a lookup, or the call has ended).'), { status: 409 });
+      res.json({ ok: true });
+      return;
+    }
     const agent = pool.get(req.params.id);
     if (!agent) throw Object.assign(new Error('No such subagent'), { status: 404 });
     bus.publish({ type: 'command', from: 'client', to: 'subagent', sub: agent.id, label: `Stop ${agent.id} (dashboard)` });
@@ -145,7 +203,7 @@ export function createApp({ client = new OpenAI({ maxRetries: 1 }), dataDir = jo
   }));
   app.post('/api/reset', wrap((req, res) => {
     if (call && !call.closed) throw Object.assign(new Error('Hang up before starting a new run'), { status: 409 });
-    pool.clear(); orchestrator.reset(); call = null; bus.reset();
+    pool.clear(); orchestrator.reset(); dropBridge(); call = null; bus.reset();
     broadcast({ type: 'hello', history: bus.history, state: state() });
     res.json({ ok: true, runId: bus.runId });
   }));
@@ -187,12 +245,16 @@ export function createApp({ client = new OpenAI({ maxRetries: 1 }), dataDir = jo
     });
   });
 
-  const shutdown = () => { if (call && !call.closed) call.close(); pool.stopAll(); };
+  // Claude sessions started in Boosker mode keep running in the session host.
+  const shutdown = () => { if (call && !call.closed) call.close(); pool.stopAll(); dropBridge(); booskerHost?.stop(); };
   return { app, server, bus, store, pool, orchestrator, getCall: () => call, shutdown };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const kit = createApp();
-  kit.server.listen(PORT, HOST, () => console.log(`Dash kit on http://${HOST}:${PORT}/ (key ${process.env.OPENAI_API_KEY ? 'loaded' : 'MISSING'})`));
+  const provider = resolveProvider();
+  // The Boosker checkout: BOOSKER_DIR, or a Boosker folder beside this one.
+  const boosker = await loadBoosker(process.env.BOOSKER_DIR ?? resolve(root, '..', 'Boosker'));
+  const kit = createApp({ provider, boosker });
+  kit.server.listen(PORT, HOST, () => console.log(`Dash kit on http://${HOST}:${PORT}/ (${provider.label}, ${provider.missing ? provider.missing + ' MISSING' : 'key loaded'}; Boosker mode ${boosker.available ? `ready from ${boosker.dir}` : 'unavailable: ' + boosker.reason})`));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { kit.shutdown(); setTimeout(() => process.exit(0), 1500).unref(); });
 }

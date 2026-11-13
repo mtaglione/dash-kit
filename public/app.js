@@ -1,9 +1,10 @@
 // Dash Kit browser client: the WebRTC call (per OpenAI's GPT-Live WebRTC
 // quickstart), the settings forms, the composer, and the views drawn from the
-// server's event stream: the conversation thread, and a timeline shown either
-// as the overlay (speech, audio and messages on one clock; overlay.js) or as
-// the sequence diagram.
+// server's event stream: the call log (grouped by call and by request; log.js),
+// and a timeline shown either as the overlay (speech, audio and messages on one
+// clock; overlay.js) or as the sequence diagram.
 import { createOverlay } from './overlay.js';
+import { createLog } from './log.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const el = (tag, attrs = {}, ...children) => {
@@ -28,11 +29,9 @@ const QUIET_TYPES = new Set(['usage', 'event', 'subagent.usage', 'sideband.attac
 let serverState = null;
 let runStartedAt = Date.now();
 const view = { thread: $('#thread'), timeline: $('#timeline') };
-const turnNodes = new Map();     // event key -> thread node
 const rowNodes = new Map();      // event key -> timeline row
-const appendNodes = new Map();   // append event id -> thread step
-const agentCards = new Map();    // subagent id -> card
 const eventsBySeq = new Map();
+const log = createLog({ root: view.thread, empty: $('#thread-empty'), stop: id => api(`/api/subagents/${id}/stop`).catch(error => note(error.message, true)) });
 const LIVE_STATES = ['attaching', 'live', 'closing'];
 const overlay = createOverlay({ scroll: $('#ov-scroll'), detail: $('#ov-detail'), follow: () => $('#follow').checked,
   isLive: id => serverState?.call?.sessionId === id && LIVE_STATES.includes(serverState.call.state), rawEvent: seq => eventsBySeq.get(seq) });
@@ -47,8 +46,8 @@ function connectSocket() {
     if (message.type === 'hello') {
       resetViews(); applyState(message.state, { force: true });
       for (const event of message.history) handleEvent(event);
-      // The cards are built from the history, so their status is set after it.
-      for (const agent of message.state.subagents ?? []) updateAgentCard(agent);
+      // The session rows are built from the history, so their state is set after it.
+      log.setState(message.state);
     }
     else if (message.type === 'event') handleEvent(message.event);
     else if (message.type === 'state') applyState(message.state);
@@ -66,17 +65,15 @@ async function api(path, body, method = 'POST') {
 }
 
 function resetViews() {
-  view.thread.replaceChildren($('#thread-empty') ?? emptyState());
-  $('#thread-empty').hidden = false;
+  log.reset();
   view.timeline.replaceChildren();
   overlay.reset();
-  for (const map of [turnNodes, rowNodes, appendNodes, agentCards, eventsBySeq]) map.clear();
+  for (const map of [rowNodes, eventsBySeq]) map.clear();
 }
-function emptyState() { return document.getElementById('thread-empty'); }
 
 function handleEvent(event) {
   eventsBySeq.set(event.seq, event);
-  renderThread(event);
+  try { log.handle(event); } catch (error) { console.error('Log row could not be drawn', event, error); }
   renderTimeline(event);
   overlay.handle(event);
 }
@@ -84,10 +81,13 @@ function handleEvent(event) {
 /* ---------------- State: settings, call, subagents ---------------- */
 function applyState(state, { force = false } = {}) {
   const first = !serverState;
+  // Flipping the Boosker switch changes what the three tabs hold, so they are
+  // filled again even where there were unsaved edits.
+  const switched = !first && booskerOn(serverState) !== booskerOn(state);
   serverState = state;
   runStartedAt = state.runStartedAt ?? runStartedAt;
   if (first || force) fillOptions(state.options);
-  for (const form of $$('form.settings')) if (force || !form.dataset.dirty) fillForm(form, state.settings[form.dataset.section]);
+  for (const form of $$('form.settings')) if (force || switched || !form.dataset.dirty) fillForm(form, formValues(form.dataset.section, state.settings));
   // Delegation picker
   const select = $('#delegation-select');
   const chosen = select.value;
@@ -95,26 +95,66 @@ function applyState(state, { force = false } = {}) {
   select.replaceChildren(el('option', { value: '', text: 'General session context' }), el('option', { value: 'latest', text: 'Latest delegation' }),
     ...delegations.slice().reverse().map(d => el('option', { value: d.id, text: `Delegation …${d.id.slice(-6)} at ${(d.offsetMs / 1000).toFixed(1)}s` })));
   select.value = [...select.options].some(o => o.value === chosen) ? chosen : '';
-  for (const agent of state.subagents ?? []) updateAgentCard(agent);
+  log.setState(state);
   showBoosker(state);
   if (!state.keyConfigured) note(`The server has no ${state.missingKey ?? 'API key'}. Add it to .env and restart.`, true);
 }
-// Boosker mode: where its code came from, whether it can run, and which of its
-// texts were edited here (and so differ from the Boosker folder).
+/* Boosker mode is one switch. When it is on, a call runs through the Boosker
+   broker (its real dispatcher and real Claude sessions), and the same three
+   tabs hold Boosker's values in these fields: they are shown, saved and
+   reloaded as Boosker's, apart from Dash Kit's own. */
+const BOOSKER_FIELDS = { voice: { prompt: 'voicePrompt' }, orchestrator: { prompt: 'dispatcherPrompt', graceMs: 'graceMs' }, subagents: { prompt: 'lookupPrompt' } };
+// Settings a Boosker call does not use; they are greyed out and left as they are.
+const BOOSKER_UNUSED = { orchestrator: ['mode', 'resultRouting', 'model', 'effort'], subagents: ['engine', 'model', 'effort', 'webSearch', 'progressToVoice', 'progressIntervalMs', 'mockDurationMs'] };
+const booskerOn = (state = serverState) => Boolean(state?.settings.boosker?.enabled);
+// What a tab shows: its own section, with Boosker's values in the mapped fields.
+function formValues(section, settings) {
+  if (!settings.boosker?.enabled) return settings[section];
+  return { ...settings[section], ...Object.fromEntries(Object.entries(BOOSKER_FIELDS[section] ?? {}).map(([field, key]) => [field, settings.boosker[key]])) };
+}
+// What a tab saves: the mapped fields as Boosker's, the unused ones not at all.
+function formPatch(section, form) {
+  const values = readForm(form);
+  if (!booskerOn()) return { [section]: values };
+  const boosker = {};
+  for (const [field, key] of Object.entries(BOOSKER_FIELDS[section] ?? {})) { boosker[key] = values[field]; delete values[field]; }
+  for (const field of BOOSKER_UNUSED[section] ?? []) delete values[field];
+  return { [section]: values, boosker };
+}
+// The switch, the note under the tabs, the labels, and the greyed-out settings.
+const plainText = new Map();   // element -> its wording when the switch is off
 function showBoosker(state) {
   const info = state.boosker ?? { available: false, reason: 'Boosker mode is not set up on this server.' };
-  const on = Boolean(state.settings.boosker?.enabled);
-  $('#mode-chip').hidden = !on;
-  $('#mode-chip').classList.toggle('error', on && !info.available);
-  $('#boosker-source').textContent = info.available
-    ? `Broker code: ${info.dir}${info.version ? ` (${info.version})` : ''}. Dispatcher ${info.models.dispatcher} (${info.models.dispatcherEffort}); sessions ${info.models.worker} (${info.models.workerEffort}).${info.voicePromptNote ? ' ' + info.voicePromptNote : ''}`
-    : info.reason;
-  const form = $('#form-boosker');
-  for (const mark of $$('[data-differs]', form)) {
-    const field = form.elements[mark.dataset.differs];
-    mark.hidden = !info.defaults || field.value === info.defaults[mark.dataset.differs];
+  const on = booskerOn(state);
+  const toggle = $('#boosker-switch');
+  toggle.checked = on;
+  toggle.disabled = !info.available && !on;
+  $('#boosker-switch-label').title = info.available ? 'Run calls through the Boosker broker and show its prompts in the three tabs' : info.reason;
+  $('#boosker-switch-label').classList.toggle('error', on && !info.available);
+  const noteNode = $('#boosker-note');
+  noteNode.hidden = !on;
+  noteNode.textContent = !on ? '' : info.available
+    ? `Boosker mode: these tabs hold Boosker's prompts, and calls use its real dispatcher (${info.models.dispatcher}, ${info.models.dispatcherEffort}) and real Claude sessions (${info.models.worker}, ${info.models.workerEffort}) on this computer. Code from ${info.dir}${info.version ? ` (${info.version})` : ''}. Greyed-out settings are not used.${info.voicePromptNote ? ' ' + info.voicePromptNote : ''}`
+    : `Boosker mode is on but cannot run: ${info.reason}`;
+  for (const node of $$('[data-boosker]')) {
+    if (!plainText.has(node)) plainText.set(node, node.innerHTML);
+    if (on) node.textContent = node.dataset.boosker; else node.innerHTML = plainText.get(node);
+  }
+  for (const form of $$('form.settings')) {
+    const unused = on ? BOOSKER_UNUSED[form.dataset.section] ?? [] : [];
+    for (const input of $$('[name]', form)) { input.disabled = unused.includes(input.name); input.closest('label')?.classList.toggle('unused', input.disabled); }
+    // "edited here": a Boosker prompt that differs from the one in the Boosker folder.
+    for (const mark of $$('[data-differs]', form)) {
+      const field = Object.entries(BOOSKER_FIELDS[form.dataset.section] ?? {}).find(([, key]) => key === mark.dataset.differs)?.[0];
+      mark.hidden = !on || !info.defaults || !field || form.elements[field].value === info.defaults[mark.dataset.differs];
+    }
   }
 }
+$('#boosker-switch').addEventListener('change', async event => {
+  const on = event.target.checked;
+  try { await api('/api/settings', { boosker: { enabled: on } }, 'PUT'); note(on ? "Boosker mode on. The tabs now hold Boosker's prompts; it applies to the next call." : "Boosker mode off. The tabs hold Dash Kit's own prompts again."); }
+  catch (error) { event.target.checked = !on; note(error.message, true); }
+});
 function fillOptions(options) {
   if (!options) return;
   $('#form-voice [name=voice]').replaceChildren(...options.voices.map(v => el('option', { value: v, text: v })));
@@ -143,21 +183,26 @@ function readForm(form) {
 function setDirty(form, dirty) { form.dataset.dirty = dirty ? '1' : ''; if (!dirty) delete form.dataset.dirty; $('.dirty', form).hidden = !dirty; }
 
 for (const form of $$('form.settings')) {
-  form.addEventListener('input', () => { setDirty(form, true); if (form.dataset.section === 'boosker' && serverState) showBoosker(serverState); });
+  form.addEventListener('input', () => { setDirty(form, true); if (serverState) showBoosker(serverState); });
   form.addEventListener('submit', async event => {
     event.preventDefault();
     const section = form.dataset.section;
     try {
-      const saved = await api('/api/settings', { [section]: readForm(form) }, 'PUT');
-      fillForm(form, saved[section]);
-      note(`${$('button[type=submit]', form).textContent.replace('Save ', '')} saved.`);
+      const saved = await api('/api/settings', formPatch(section, form), 'PUT');
+      fillForm(form, formValues(section, saved));
+      note(`${$('button[type=submit]', form).textContent.replace('Save ', '')} saved${booskerOn() ? ' (Boosker mode)' : ''}.`);
     } catch (error) { note(error.message, true); }
   });
+  // In Boosker mode the button reloads this tab's Boosker values from the
+  // Boosker folder and leaves Dash Kit's own settings alone.
   $('[data-reset]', form).addEventListener('click', async () => {
-    const boosker = form.dataset.section === 'boosker';
-    if (!confirm(boosker ? 'Reload the three texts from the Boosker folder? Your edits here are replaced.' : 'Restore the default settings for this section? Your edits here are replaced.')) return;
-    try { const saved = await api('/api/settings/reset', { section: form.dataset.section }); fillForm(form, saved[form.dataset.section]); note('Defaults restored.'); }
-    catch (error) { note(error.message, true); }
+    const section = form.dataset.section, boosker = booskerOn();
+    if (!confirm(boosker ? "Reload this tab's Boosker values from the Boosker folder? Your edits to them are replaced." : 'Restore the default settings for this section? Your edits here are replaced.')) return;
+    try {
+      const saved = await api('/api/settings/reset', boosker ? { section: 'boosker', fields: Object.values(BOOSKER_FIELDS[section] ?? {}) } : { section });
+      fillForm(form, formValues(section, saved));
+      note(boosker ? 'Reloaded from the Boosker folder.' : 'Defaults restored.');
+    } catch (error) { note(error.message, true); }
   });
 }
 for (const tab of $$('#settings-tabs [role=tab]')) {
@@ -174,126 +219,26 @@ for (const button of $$('.tabs-mobile button')) {
   });
 }
 
-/* ---------------- Conversation thread ---------------- */
+/* ---------------- Call log (log.js) ---------------- */
 const fmtTime = at => { const s = Math.max(0, (at - runStartedAt) / 1000); return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`; };
 const shortId = id => (id ? `…${String(id).slice(-6)}` : 'none');
-function addToThread(node) {
-  $('#thread-empty').hidden = true;
-  const atBottom = view.thread.scrollHeight - view.thread.scrollTop - view.thread.clientHeight < 80;
-  view.thread.append(node);
-  if (atBottom) view.thread.scrollTop = view.thread.scrollHeight;
-  return node;
+// What the log shows is remembered on this device.
+for (const [id, name] of [['#log-errors', 'only-errors'], ['#log-everything', 'show-low']]) {
+  const box = $(id);
+  const apply = () => { view.thread.classList.toggle(name, box.checked); localStorage.setItem(`dashkit.log.${name}`, box.checked ? '1' : ''); };
+  box.checked = localStorage.getItem(`dashkit.log.${name}`) === '1';
+  box.addEventListener('change', apply);
+  apply();
 }
-function step(event, route, body, { meta, details, cls = '' } = {}) {
-  const node = el('div', { class: `step from-${event.from} ${cls} ${event.manual ? 'manual' : ''} ${event.error ? 'error' : ''}` },
-    el('span', { class: 'route', text: route }), el('span', { class: 'body', text: body }));
-  if (meta) node.append(el('span', { class: 'meta', text: meta }));
-  if (details) node.append(el('details', {}, el('summary', { text: details.summary }), el('pre', { text: details.text })));
-  return addToThread(node);
+// The composer folds away so the log has the screen; folded by default on a phone.
+function showComposer(open) {
+  $('#composer').classList.toggle('folded', !open);
+  $('#btn-composer').setAttribute('aria-expanded', String(open));
+  $('#btn-composer').textContent = open ? 'Hide composer' : 'Show composer';
+  localStorage.setItem('dashkit.composer', open ? 'open' : 'folded');
 }
-function divider(text) { return addToThread(el('div', { class: 'divider', text })); }
-
-function renderThread(e) {
-  switch (e.type) {
-    case 'transcript': {
-      let node = turnNodes.get(e.key);
-      if (!node) {
-        node = addToThread(el('div', { class: `turn ${e.role}` },
-          el('div', { class: 'who' }, el('span', { text: e.role === 'user' ? 'You' : 'Kit on GPT-Live' }), el('time', { text: `${(e.startMs / 1000).toFixed(1)}s` })),
-          el('div', { class: 'said' })));
-        turnNodes.set(e.key, node);
-      }
-      $('.said', node).textContent = e.text.trim();
-      if (view.thread.scrollHeight - view.thread.scrollTop - view.thread.clientHeight < 160) view.thread.scrollTop = view.thread.scrollHeight;
-      return;
-    }
-    case 'typed':
-      addToThread(el('div', { class: 'turn user typed' }, el('div', { class: 'who' }, el('span', { text: 'You typed' }), el('time', { text: fmtTime(e.at) })), el('div', { class: 'said', text: e.text })));
-      return;
-    case 'session.created': divider(`Call started: session ${shortId(e.sessionId)}`); return;
-    case 'session.closed': divider(e.label); return;
-    case 'session.failed': step({ ...e, error: true }, 'GPT-Live', e.label); return;
-    case 'delegation':
-      step(e, 'GPT-Live to Orchestrator', 'Delegated a request', { meta: `delegation ${shortId(e.delegationId)}, ${e.label.split(' at ')[1] ?? ''} on the call` });
-      return;
-    case 'orchestrator.input':
-      step(e, 'Orchestrator', 'Read the request', { details: { summary: 'What it was given', text: e.text } });
-      return;
-    case 'orchestrator.tool':
-      if (e.tool === 'tell_voice') return;   // the append itself is shown
-      if (e.tool === 'start_subagent' && e.sub) { ensureAgentCard(e.sub, { title: e.label.split('"')[1], task: e.text }); return; }
-      step(e, 'Orchestrator', e.label, e.text ? { meta: e.text } : {});
-      return;
-    case 'orchestrator.direct': step(e, 'Orchestrator', e.label); return;
-    case 'orchestrator.done': step(e, 'Orchestrator', e.text || 'Finished its turn', { meta: e.label.split(':')[0], cls: 'dim' }); return;
-    case 'orchestrator.error': step({ ...e, error: true }, 'Orchestrator', e.label); return;
-    case 'subagent.progress': agentProgress(e.sub, e.text); return;
-    case 'subagent.delta': { const card = ensureAgentCard(e.sub); $('.agent-draft', card).textContent = e.text; $('.agent-draft', card).hidden = false; return; }
-    case 'subagent.result': case 'subagent.failed': {
-      const card = ensureAgentCard(e.sub);
-      $('.agent-draft', card).hidden = true;
-      $('.agent-result', card).textContent = e.text; $('.agent-result', card).hidden = false;
-      return;
-    }
-    case 'append': {
-      const kind = KIND_NAME[e.kind] ?? e.kind;
-      const node = step(e, `${LANE_NAME[e.from]} to GPT-Live`, `${kind}: ${e.text === '' ? '(empty, cancels the automatic acknowledgement)' : e.text}`,
-        { meta: `${e.sub ? e.sub + ', ' : ''}delegation ${shortId(e.delegationId)}, waiting for acknowledgement` });
-      appendNodes.set(e.eventId, node);
-      return;
-    }
-    case 'append.ack': {
-      const node = appendNodes.get(e.replyTo);
-      if (node) $('.meta', node).textContent = $('.meta', node).textContent.replace('waiting for acknowledgement', e.label.replace(/^[a-z ]+accepted/i, 'accepted'));
-      return;
-    }
-    case 'append.skipped': step(e, `${LANE_NAME[e.from]} to GPT-Live`, e.label, { cls: 'dim' }); return;
-    case 'error': {
-      const node = e.replyTo && appendNodes.get(e.replyTo);
-      if (node) { node.classList.add('error'); $('.meta', node).textContent = e.label; return; }
-      step({ ...e, error: true }, 'GPT-Live', e.label);
-      return;
-    }
-    case 'sideband.error': step({ ...e, error: true }, 'App', e.label); return;
-    case 'command': case 'settings': step(e, LANE_NAME[e.from], e.label, { cls: 'dim' }); return;
-    case 'client.pc.failed': step({ ...e, error: true }, 'App', e.label); return;
-  }
-}
-
-/* Subagent cards */
-function ensureAgentCard(id, info = {}) {
-  let card = agentCards.get(id);
-  if (!card) {
-    card = el('div', { class: 'agent', 'data-status': 'running' },
-      el('div', { class: 'agent-head' }, el('span', { class: 'agent-id', text: id }), el('span', { class: 'agent-title', text: info.title ?? '' }), el('span', { class: 'agent-state', text: 'starting' })),
-      el('div', { class: 'agent-task', text: info.task ?? '' }),
-      el('ol', { class: 'agent-progress' }),
-      el('div', { class: 'agent-draft', hidden: true }),
-      el('div', { class: 'agent-result', hidden: true }),
-      el('button', { class: 'agent-stop', type: 'button', text: 'Stop', onclick: () => api(`/api/subagents/${id}/stop`).catch(error => note(error.message, true)) }));
-    agentCards.set(id, card);
-    addToThread(card);
-  }
-  if (info.title) $('.agent-title', card).textContent = info.title;
-  if (info.task) $('.agent-task', card).textContent = info.task;
-  return card;
-}
-function agentProgress(id, line) {
-  const card = ensureAgentCard(id);
-  const list = $('.agent-progress', card);
-  list.append(el('li', { text: line }));
-  while (list.children.length > 8) list.firstChild.remove();
-}
-function updateAgentCard(agent) {
-  const card = agentCards.get(agent.id);
-  if (!card) return;
-  card.dataset.status = agent.status;
-  $('.agent-title', card).textContent = agent.title;
-  $('.agent-task', card).textContent = agent.task;
-  $('.agent-state', card).textContent = { running: 'working', done: 'finished', failed: 'failed', stopped: 'stopped', idle: 'waiting' }[agent.status] ?? agent.status;
-  $('.agent-stop', card).hidden = agent.status !== 'running';
-  if (agent.result && agent.status !== 'running') { $('.agent-result', card).textContent = agent.result; $('.agent-result', card).hidden = false; $('.agent-draft', card).hidden = true; }
-}
+$('#btn-composer').addEventListener('click', () => showComposer($('#composer').classList.contains('folded')));
+showComposer((localStorage.getItem('dashkit.composer') ?? (window.innerWidth < 700 ? 'folded' : 'open')) === 'open');
 
 /* ---------------- Timeline (sequence diagram) ---------------- */
 $('#lanes-head').replaceChildren(el('span', { text: '' }), ...LANES.map(lane => el('span', { class: lane, text: LANE_NAME[lane] })));
@@ -537,7 +482,7 @@ setInterval(() => {
   if (call.ready) {
     const s = Math.floor((Date.now() - call.startedAt) / 1000);
     clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} on call, ${serverState?.call?.usageSeconds ?? 0}s billed`;
-  } else if (serverState?.call?.state === 'closed') clock.textContent = `Last call: ${serverState.call.usageSeconds}s billed`;
+  } else clock.textContent = serverState?.call?.state === 'closed' ? `Last call: ${serverState.call.usageSeconds}s billed` : '—';
   requestAnimationFrame(drawMeters);
 })();
 
@@ -550,8 +495,10 @@ $('#btn-mute').addEventListener('click', async () => {
   catch (error) { note(error.message, true); }
 });
 $('#btn-reset').addEventListener('click', async () => {
-  if (!confirm('Start a new run? The thread, timeline and subagents are cleared. The current run stays in data/runs.')) return;
-  try { await api('/api/reset'); note('New run started.'); } catch (error) { note(error.message, true); }
+  const live = LIVE_STATES.includes(serverState?.call?.state);
+  if (!confirm(live ? 'Clear the log? Everything before the call in progress is removed from the screen. The call stays. Nothing is deleted from data/runs.'
+    : 'Clear the log? The log, the timeline and the session list are emptied. Nothing is deleted from data/runs.')) return;
+  try { const cleared = await api('/api/reset'); note(cleared.keptCall ? 'Log cleared. The call in progress was kept.' : 'Log cleared.'); } catch (error) { note(error.message, true); }
 });
 window.addEventListener('pagehide', () => { if (call.ready && call.events?.readyState === 'open') call.events.send(JSON.stringify({ type: 'session.close' })); });
 

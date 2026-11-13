@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../server.mjs';
-import { appVoicePrompt, withSystemPrompt, loadBoosker } from '../lib/boosker.mjs';
+import { appVoicePrompt, withSystemPrompt, withLookupPrompt, loadBoosker } from '../lib/boosker.mjs';
 import { SettingsStore } from '../lib/config.mjs';
 import { FakeSideband, scriptedClient, until } from './helpers.mjs';
 
@@ -53,6 +53,12 @@ test('the edited dispatcher prompt replaces the built-in one in the process argu
   assert.deepEqual(withSystemPrompt(['-p', '--model', 'm'], 'edited'), ['-p', '--model', 'm']);
 });
 
+test('an edited lookup instruction takes the built-in one\'s place inside the lookup prompt', () => {
+  const args = ['-p', '--model', 'm', '[BUILT IN LOOKUP TEXT\n\nArtifacts: /tmp/x]\n\nWhat is the branch?'];
+  assert.deepEqual(withLookupPrompt(args, 'BUILT IN LOOKUP TEXT', 'Answer in one sentence. Cost: $1'), ['-p', '--model', 'm', '[Answer in one sentence. Cost: $1\n\nArtifacts: /tmp/x]\n\nWhat is the branch?']);
+  assert.equal(withLookupPrompt(args, 'BUILT IN LOOKUP TEXT', 'BUILT IN LOOKUP TEXT'), args, 'an unedited instruction leaves the arguments alone');
+});
+
 test('a missing Boosker folder leaves Boosker mode unavailable with a reason', async () => {
   const loaded = await loadBoosker(join(tmpdir(), 'no-such-boosker-folder'));
   assert.equal(loaded.available, false);
@@ -61,15 +67,19 @@ test('a missing Boosker folder leaves Boosker mode unavailable with a reason', a
 
 test('a Boosker text that matches the repository is not saved, so it keeps following the repository', () => {
   const path = join(mkdtempSync(join(tmpdir(), 'dashkit-')), 'settings.json');
-  const first = new SettingsStore(path, { boosker: { voicePrompt: 'repo voice v1', delegationParagraph: 'repo paragraph', dispatcherPrompt: 'repo dispatcher' } });
+  const first = new SettingsStore(path, { boosker: { voicePrompt: 'repo voice v1', dispatcherPrompt: 'repo dispatcher', lookupPrompt: 'repo lookup' } });
   first.update({ boosker: { enabled: true, dispatcherPrompt: 'edited dispatcher' } });
   const onDisk = JSON.parse(readFileSync(path, 'utf8')).boosker;
   assert.deepEqual(onDisk, { enabled: true, dispatcherPrompt: 'edited dispatcher', graceMs: 500 });
-  const later = new SettingsStore(path, { boosker: { voicePrompt: 'repo voice v2', delegationParagraph: 'repo paragraph', dispatcherPrompt: 'repo dispatcher v2' } });
+  const later = new SettingsStore(path, { boosker: { voicePrompt: 'repo voice v2', dispatcherPrompt: 'repo dispatcher v2', lookupPrompt: 'repo lookup' } });
   assert.equal(later.get().boosker.voicePrompt, 'repo voice v2');
   assert.equal(later.get().boosker.dispatcherPrompt, 'edited dispatcher');
-  assert.equal(later.reset('boosker').boosker.dispatcherPrompt, 'repo dispatcher v2');
-  assert.equal(later.get().boosker.enabled, true, 'reloading the texts keeps the mode switch');
+  // One tab's reload leaves the other Boosker values as they are.
+  later.update({ boosker: { lookupPrompt: 'edited lookup', graceMs: 1200 } });
+  const reloaded = later.reset('boosker', ['dispatcherPrompt', 'graceMs']).boosker;
+  assert.deepEqual([reloaded.dispatcherPrompt, reloaded.graceMs, reloaded.lookupPrompt], ['repo dispatcher v2', 500, 'edited lookup']);
+  assert.equal(later.reset('boosker').boosker.lookupPrompt, 'repo lookup');
+  assert.equal(later.get().boosker.enabled, true, 'reloading keeps the mode switch');
 });
 
 /* ---- A call in Boosker mode, with stand-ins for the broker code ---- */
@@ -109,7 +119,7 @@ async function startBoosker() {
   const dataDir = mkdtempSync(join(tmpdir(), 'dashkit-'));
   const host = { feed: new FakeFeed(), binary: 'claude', stop() {} };
   const boosker = { available: true, dir: '/repos/Boosker', version: 'abc1234', AgentCall: FakeAgentCall, Dispatcher: FakeDispatcher, ClaudeHost: class {},
-    defaults: { voicePrompt: 'VOICE PROMPT', delegationParagraph: 'DELEGATION PARAGRAPH', dispatcherPrompt: 'DISPATCHER PROMPT' },
+    defaults: { voicePrompt: 'VOICE PROMPT', dispatcherPrompt: 'DISPATCHER PROMPT', lookupPrompt: 'LOOKUP PROMPT' },
     models: { dispatcher: 'sonnet', dispatcherEffort: 'low', worker: 'opus', workerEffort: 'xhigh' } };
   const sessions = [];
   const client = scriptedClient([]);
@@ -126,7 +136,7 @@ test('Boosker mode: the call uses Boosker texts, the handler shares the sideband
   try {
     kit.store.update({ boosker: { enabled: true, graceMs: 900 }, voice: { greeting: { enabled: false } } });
     const config = await (await fetch(base + '/api/session-config')).json();
-    assert.equal(config.instructions, 'VOICE PROMPT\nDELEGATION PARAGRAPH');
+    assert.equal(config.instructions, 'VOICE PROMPT');
     assert.equal(config.store, false);
     assert.equal((await post('/api/session', { sdp: 'v=0\r\noffer' })).status, 201);
     const ws = FakeSideband.instances.at(-1), call = FakeAgentCall.instances.at(-1), dispatcher = FakeDispatcher.instances.at(-1);
@@ -196,6 +206,68 @@ test('Boosker mode: the call uses Boosker texts, the handler shares the sideband
   } finally { await stop(); }
 });
 
+test('Boosker mode: the dispatcher\'s Claude session and each agent session are shown with where they open in Claude', async () => {
+  const { kit, host, post, base, stop } = await startBoosker();
+  try {
+    host.request = async (method, path) => ({ sessionId: path.split('/').pop(), remoteControl: { state: 'enabled', sessionUrl: 'https://claude.ai/code/session_worker' } });
+    kit.store.update({ boosker: { enabled: true }, voice: { greeting: { enabled: false } } });
+    assert.equal((await post('/api/session', { sdp: 'v=0\r\noffer' })).status, 201);
+    const call = FakeAgentCall.instances.at(-1), dispatcher = FakeDispatcher.instances.at(-1);
+    assert.match(dispatcher.options.title, /^Dash Kit dispatcher/, 'the session is named so it can be found in the Claude session list');
+    const info = async () => (await (await fetch(base + '/api/state')).json()).dispatcher;
+    assert.equal((await info()).listed, 'off', 'a Boosker checkout without Remote Control for the dispatcher says so');
+
+    dispatcher.emit('spawn', { sessionID: 'claude-session-1', resume: false });
+    dispatcher.emit('remote', { sessionID: 'claude-session-1', state: 'starting', connectionState: 'ready' });
+    dispatcher.emit('remote', { sessionID: 'claude-session-1', state: 'enabled', sessionUrl: 'https://claude.ai/code/session_dispatcher' });
+    dispatcher.emit('remote', { sessionID: 'claude-session-1', state: 'enabled', sessionUrl: 'https://claude.ai/code/session_dispatcher', connectionState: 'connected' });
+    const shown = await info();
+    assert.deepEqual([shown.claudeSessionId, shown.listed, shown.url, shown.process], ['claude-session-1', 'listed', 'https://claude.ai/code/session_dispatcher', 'running']);
+    const listed = kit.bus.history.filter(event => event.type === 'dispatcher.session');
+    assert.equal(listed.length, 1, 'said once, not on every connection change');
+    assert.equal(listed[0].url, 'https://claude.ai/code/session_dispatcher');
+    assert.match(listed[0].label, /listed in Claude as "Dash Kit dispatcher/);
+
+    // An agent session gets its address from the session host.
+    const thread = { id: 'thread-9', title: 'Task' };
+    host.feed.publish('live', 'request', { sessionID: 'live_test123', action: 'start', title: 'Task', text: 'Do it', cwd: '/repos/dash-kit' });
+    call.threads.set(thread, { key: `s${++call.sessionCount}` });
+    host.feed.publish('codex', 'run.started', { sessionID: 'live_test123', threadID: 'thread-9', cwd: '/repos/dash-kit', prompt: 'Do it' });
+    await until(() => kit.bus.history.some(event => event.type === 'subagent.session'));
+    const agent = (await (await fetch(base + '/api/state')).json()).subagents[0];
+    assert.deepEqual([agent.id, agent.url, agent.claudeSessionId], ['s1', 'https://claude.ai/code/session_worker', 'thread-9']);
+
+    dispatcher.emit('remote', { sessionID: 'claude-session-1', state: 'unavailable', error: 'Remote Control disconnected.' });
+    assert.deepEqual([(await info()).listed, (await info()).error], ['unlisted', 'Remote Control disconnected.']);
+  } finally { await stop(); }
+});
+
+test('Clear log: with no call a new run starts; during a call the call in progress is kept', async () => {
+  const { kit, post, base, stop } = await startBoosker();
+  try {
+    kit.store.update({ boosker: { enabled: true }, voice: { greeting: { enabled: false } } });
+    kit.bus.publish({ type: 'settings', from: 'client', label: 'an old line' });
+    const firstRun = kit.bus.runId;
+    assert.equal((await post('/api/session', { sdp: 'v=0\r\noffer' })).status, 201);
+    const ws = FakeSideband.instances.at(-1);
+    ws.server({ type: 'session.started', event_id: 's', session: { id: 'live_test123' } });
+    let cleared = await (await post('/api/reset', {})).json();
+    assert.deepEqual([cleared.keptCall, cleared.runId], [true, firstRun], 'the run and its file go on');
+    assert.equal(kit.bus.history[0].type, 'session.create', 'everything before the call in progress is gone');
+    assert.ok(kit.bus.history.some(event => event.type === 'session.started'));
+    assert.equal((await (await fetch(base + '/api/state')).json()).boosker.active, true, 'the call and its handler are untouched');
+
+    ws.server({ type: 'session.closed', event_id: 'c', reason: 'close_requested', usage: { seconds: 3 } });
+    await new Promise(done => setTimeout(done, 5));
+    cleared = await (await post('/api/reset', {})).json();
+    assert.equal(cleared.keptCall, false);
+    assert.notEqual(cleared.runId, firstRun);
+    assert.deepEqual(kit.bus.history, []);
+    const state = await (await fetch(base + '/api/state')).json();
+    assert.deepEqual([state.call, state.dispatcher, state.subagents], [null, null, []]);
+  } finally { await stop(); }
+});
+
 test('Boosker mode off: delegations go to Dash Kit\'s own orchestrator and no handler is made', async () => {
   const { kit, post, stop } = await startBoosker();
   try {
@@ -206,6 +278,24 @@ test('Boosker mode off: delegations go to Dash Kit\'s own orchestrator and no ha
     const ws = FakeSideband.instances.at(-1);
     ws.server({ type: 'session.delegation.created', event_id: 'd', offset_ms: 10, delegation: { id: 'del_9', type: 'delegation', target: 'client' } });
     await until(() => kit.orchestrator.turns === 1);
+  } finally { await stop(); }
+});
+
+test('the Boosker switch keeps Dash Kit\'s own prompts apart, and one tab\'s reload touches only its Boosker values', async () => {
+  const { kit, post, base, stop } = await startBoosker();
+  try {
+    const put = body => fetch(base + '/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(response => response.json());
+    const own = kit.store.get().voice.prompt;
+    // What the Voice agent tab saves with the switch on: its prompt as Boosker's.
+    let saved = await put({ boosker: { enabled: true, voicePrompt: 'EDITED BOOSKER VOICE' }, voice: { voice: 'cedar' } });
+    assert.equal(saved.voice.prompt, own);
+    assert.equal(saved.voice.voice, 'cedar');
+    assert.equal((await (await fetch(base + '/api/session-config')).json()).instructions, 'EDITED BOOSKER VOICE');
+    saved = await (await post('/api/settings/reset', { section: 'boosker', fields: ['voicePrompt'] })).json();
+    assert.equal(saved.boosker.voicePrompt, 'VOICE PROMPT');
+    assert.equal(saved.boosker.enabled, true);
+    saved = await put({ boosker: { enabled: false } });
+    assert.equal((await (await fetch(base + '/api/session-config')).json()).instructions, own);
   } finally { await stop(); }
 });
 
@@ -226,9 +316,9 @@ const booskerDir = process.env.BOOSKER_DIR ?? resolve(dirname(fileURLToPath(impo
 test('the real Boosker call handler answers a delegation through the shared sideband', { skip: !existsSync(join(booskerDir, 'backend', 'live-agent.mjs')) && 'no Boosker checkout beside this one' }, async () => {
   const real = await loadBoosker(booskerDir);
   assert.equal(real.available, true, real.reason);
-  assert.match(real.defaults.voicePrompt, /Delegation policy:/);
-  assert.match(real.defaults.delegationParagraph, /dispatcher/i);
+  assert.match(real.defaults.voicePrompt, /Delegation policy:[\s\S]+A dispatcher on the computer decides/, "the app's prompt, then the broker's paragraph");
   assert.match(real.defaults.dispatcherPrompt, /"actions"/);
+  assert.match(real.defaults.lookupPrompt, /answering a voice user/);
 
   class SayingDispatcher extends FakeDispatcher {
     get usable() { return !this.closed; }

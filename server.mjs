@@ -14,7 +14,7 @@ import { LiveCall, createLiveSession, buildSessionConfig, APPEND_KINDS, short } 
 import { SubagentPool } from './lib/subagents.mjs';
 import { Orchestrator } from './lib/orchestrator.mjs';
 import { resolveProvider, createClient } from './lib/provider.mjs';
-import { loadBoosker, booskerInfo, BooskerBridge } from './lib/boosker.mjs';
+import { loadBoosker, booskerInfo, BooskerBridge, createBooskerHost } from './lib/boosker.mjs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
@@ -74,6 +74,8 @@ export function createApp({ provider = resolveProvider(), client = createClient(
     runId: bus.runId, runStartedAt: bus.runStartedAt, settings: settings(),
     call: call ? call.status() : null, orchestratorBusy: bridge ? bridge.busy() : orchestrator.busy,
     subagents: bridge ? bridge.summaries() : pool.list().map(a => a.summary()),
+    // The dispatcher's own Claude session in Boosker mode: its name and where it opens.
+    dispatcher: bridge ? bridge.dispatcherInfo() : null,
     boosker: { ...booskerInfo(boosker), active: Boolean(bridge && !bridge.closed) },
     options: { voices: VOICES, models: provider.models, efforts: EFFORTS, appendKinds: APPEND_KINDS },
     provider: provider.label, keyConfigured: !provider.missing, missingKey: provider.missing
@@ -110,8 +112,10 @@ export function createApp({ provider = resolveProvider(), client = createClient(
   app.post('/api/settings/reset', wrap((req, res) => {
     const section = req.body?.section;
     if (section && !['voice', 'orchestrator', 'subagents', 'boosker'].includes(section)) throw Object.assign(new Error('Unknown section'), { status: 400 });
-    store.reset(section);
-    bus.publish({ type: 'settings', from: 'client', to: 'system', label: `Settings reset to defaults: ${section ?? 'all'}` });
+    // For Boosker, `fields` limits the reload to those values (one tab's worth).
+    const fields = section === 'boosker' && Array.isArray(req.body?.fields) ? req.body.fields.map(String) : null;
+    store.reset(section, fields);
+    bus.publish({ type: 'settings', from: 'client', to: 'system', label: section === 'boosker' ? `Reloaded from the Boosker folder: ${fields?.join(', ') ?? 'all Boosker values'}` : `Settings reset to defaults: ${section ?? 'all'}` });
     fitModels();
     broadcastState();
     res.json(settings());
@@ -125,7 +129,7 @@ export function createApp({ provider = resolveProvider(), client = createClient(
     if (useBoosker) {
       if (!boosker?.available) throw Object.assign(new Error(`Boosker mode is on, but its code is not loaded. ${booskerInfo(boosker).reason}`), { status: 409 });
       const b = settings().boosker;
-      if (!b.voicePrompt.trim() || !b.dispatcherPrompt.trim()) throw Object.assign(new Error('Boosker mode needs a voice prompt and a dispatcher prompt. Open the Boosker tab.'), { status: 400 });
+      if (!b.voicePrompt.trim() || !b.dispatcherPrompt.trim()) throw Object.assign(new Error('Boosker mode needs a voice prompt (Voice agent tab) and a dispatcher prompt (Delegation agent tab).'), { status: 400 });
     }
     if (call && !call.closed) { bus.publish({ type: 'command', from: 'system', to: 'voice', label: 'New call requested; closing the previous one' }); call.close(); }
     bus.publish({ type: 'session.create', from: 'client', to: 'voice', label: `POST /v1/live/sessions (gpt-live-1, voice ${settings().voice.voice}${useBoosker ? ', Boosker mode' : ''})`, data: { session: buildSessionConfig(settings()) } });
@@ -144,7 +148,7 @@ export function createApp({ provider = resolveProvider(), client = createClient(
     if (useBoosker) {
       // The Boosker handler reads the same sideband and takes every delegation;
       // Dash Kit's own orchestrator and subagents stay out of this call.
-      booskerHost ??= new boosker.ClaudeHost({ cwd: reposRoot });
+      booskerHost ??= createBooskerHost(boosker, { cwd: reposRoot, settings });
       const handler = bridge = new BooskerBridge({ boosker, host: booskerHost, live, bus, settings, dataDir });
       handler.on('change', broadcastState);
       live.on('closed', () => handler.close());
@@ -201,11 +205,16 @@ export function createApp({ provider = resolveProvider(), client = createClient(
     bus.publish({ type: 'command', from: 'client', to: 'subagent', sub: agent.id, label: `Stop ${agent.id} (dashboard)` });
     res.json({ ok: agent.stop() });
   }));
+  // Clear log. With no call up, a new run starts: the log, the subagents and the
+  // last call's session cards are cleared. During a call, the call in progress
+  // stays (its events from session creation on, and its sessions) and everything
+  // before it goes. Nothing is removed from data/runs.
   app.post('/api/reset', wrap((req, res) => {
-    if (call && !call.closed) throw Object.assign(new Error('Hang up before starting a new run'), { status: 409 });
-    pool.clear(); orchestrator.reset(); dropBridge(); call = null; bus.reset();
+    const live = Boolean(call && !call.closed);
+    if (live) bus.keepFrom(bus.history.findLastIndex(event => event.type === 'session.create'));
+    else { pool.clear(); orchestrator.reset(); dropBridge(); call = null; bus.reset(); }
     broadcast({ type: 'hello', history: bus.history, state: state() });
-    res.json({ ok: true, runId: bus.runId });
+    res.json({ ok: true, runId: bus.runId, keptCall: live });
   }));
   app.get('/api/export', (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="dash-kit-${bus.runId}.json"`);

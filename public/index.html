@@ -18,7 +18,7 @@
     </div>
     <div class="call" id="call">
       <span class="status" id="status" data-state="idle">Idle</span>
-      <span class="mode-chip" id="mode-chip" hidden title="Calls run through the Boosker broker: real dispatcher, real Claude sessions">Boosker mode</span>
+      <label class="mode-switch" id="boosker-switch-label"><input type="checkbox" id="boosker-switch"> Boosker</label>
       <span class="clock" id="clock" title="Call time, and voice seconds billed">—</span>
       <span class="meters" aria-hidden="true">
         <span class="meter" title="Your microphone"><span class="meter-name">You</span><span class="meter-track"><span id="meter-mic"></span></span></span>
@@ -30,14 +30,12 @@
       <button id="btn-hangup" hidden>Hang up</button>
       <button id="btn-mute" hidden aria-pressed="false">Mute mic</button>
       <button id="btn-play" hidden>Play audio</button>
-      <button id="btn-reset" class="quiet" title="Clear the thread, timeline and subagents">New run</button>
-      <a id="btn-export" class="quiet button" href="/api/export" download>Export log</a>
     </div>
   </header>
 
   <nav class="tabs-mobile" aria-label="Panels">
     <button data-show="left">Prompts</button>
-    <button data-show="center" class="active">Conversation</button>
+    <button data-show="center" class="active">Call log</button>
     <button data-show="right">Timeline</button>
   </nav>
 
@@ -48,14 +46,14 @@
         <button role="tab" data-tab="voice" aria-selected="true" class="lane-voice">Voice agent</button>
         <button role="tab" data-tab="orchestrator" aria-selected="false" class="lane-orchestrator">Delegation agent</button>
         <button role="tab" data-tab="subagents" aria-selected="false" class="lane-subagent">Subagents</button>
-        <button role="tab" data-tab="boosker" aria-selected="false" class="lane-orchestrator">Boosker</button>
       </div>
+      <p class="hint boosker-note" id="boosker-note" hidden></p>
 
       <form class="settings" data-section="voice" id="form-voice">
         <label class="field grow">
-          <span class="field-name">GPT-Live instructions</span>
+          <span class="field-name">GPT-Live instructions <em class="differs" data-differs="voicePrompt" hidden>edited here</em></span>
           <textarea name="prompt" spellcheck="true" rows="18"></textarea>
-          <span class="hint">Sent as <code>instructions</code> when a call starts. Changes apply to the next call; use an instruction from the composer to steer a call in progress.</span>
+          <span class="hint" data-boosker="Boosker's voice prompt: the app's default agent prompt, then the paragraph the broker adds on every call. An agent edited on the phone has its own prompt, stored only on the phone; paste it here to test it. Changes apply to the next call.">Sent as <code>instructions</code> when a call starts. Changes apply to the next call; use an instruction from the composer to steer a call in progress.</span>
         </label>
         <div class="row">
           <label class="field"><span class="field-name">Voice</span><select name="voice"></select></label>
@@ -66,14 +64,14 @@
         <label class="check"><input type="checkbox" name="greeting.enabled"> Greet when the call starts</label>
         <label class="field"><span class="field-name">Greeting</span><textarea name="greeting.text" rows="3"></textarea></label>
         <label class="check"><input type="checkbox" name="suppressAck"> Cancel the automatic acknowledgement (empty silent context on each delegation)</label>
-        <div class="form-actions"><button type="submit" class="primary">Save voice agent</button><button type="button" class="quiet" data-reset>Restore defaults</button><a class="quiet small" href="/api/session-config" target="_blank" rel="noopener">View session config</a><span class="dirty" hidden>Unsaved changes</span></div>
+        <div class="form-actions"><button type="submit" class="primary">Save voice agent</button><button type="button" class="quiet" data-reset data-boosker="Reload from Boosker">Restore defaults</button><a class="quiet small" href="/api/session-config" target="_blank" rel="noopener">View session config</a><span class="dirty" hidden>Unsaved changes</span></div>
       </form>
 
       <form class="settings" data-section="orchestrator" id="form-orchestrator" hidden>
         <label class="field grow">
-          <span class="field-name">Orchestrator instructions</span>
+          <span class="field-name"><span data-boosker="Dispatcher instructions">Orchestrator instructions</span> <em class="differs" data-differs="dispatcherPrompt" hidden>edited here</em></span>
           <textarea name="prompt" spellcheck="true" rows="18"></textarea>
-          <span class="hint">The Responses model that reads each delegation and routes it with tools: start, message, or stop a subagent, or tell the voice something. Changes apply on its next turn.</span>
+          <span class="hint" data-boosker="Boosker's dispatcher reads each delegated request and answers with actions: start a session, send to one, stop one, run a lookup, or say something. Changes apply to the next call.">The Responses model that reads each delegation and routes it with tools: start, message, or stop a subagent, or tell the voice something. Changes apply on its next turn.</span>
         </label>
         <div class="row">
           <label class="field"><span class="field-name">Mode</span><select name="mode"><option value="agent">Orchestrator model routes</option><option value="direct">Direct: one subagent per delegation</option></select></label>
@@ -84,14 +82,14 @@
           <label class="field"><span class="field-name">Reasoning effort</span><select name="effort"></select></label>
           <label class="field"><span class="field-name">Wait for transcript (ms)</span><input name="graceMs" type="number" min="0" max="5000" step="100"></label>
         </div>
-        <div class="form-actions"><button type="submit" class="primary">Save delegation agent</button><button type="button" class="quiet" data-reset>Restore defaults</button><span class="dirty" hidden>Unsaved changes</span></div>
+        <div class="form-actions"><button type="submit" class="primary">Save delegation agent</button><button type="button" class="quiet" data-reset data-boosker="Reload from Boosker">Restore defaults</button><span class="dirty" hidden>Unsaved changes</span></div>
       </form>
 
       <form class="settings" data-section="subagents" id="form-subagents" hidden>
         <label class="field grow">
-          <span class="field-name">Subagent instructions</span>
+          <span class="field-name"><span data-boosker="Lookup instructions">Subagent instructions</span> <em class="differs" data-differs="lookupPrompt" hidden>edited here</em></span>
           <textarea name="prompt" spellcheck="true" rows="14"></textarea>
-          <span class="hint">Each subagent is its own Responses conversation. Changes apply to subagents started after saving.</span>
+          <span class="hint" data-boosker="Boosker's workers are real Claude sessions on this computer. A session gets the request as it was spoken, with nothing added; this text is added to a lookup only. Changes apply to lookups started after saving.">Each subagent is its own Responses conversation. Changes apply to subagents started after saving.</span>
         </label>
         <div class="row">
           <label class="field"><span class="field-name">Engine</span><select name="engine"><option value="openai">Responses API</option><option value="mock">Mock (no cost)</option></select></label>
@@ -104,49 +102,35 @@
           <label class="field"><span class="field-name">Progress interval (ms)</span><input name="progressIntervalMs" type="number" min="0" max="60000" step="500"></label>
           <label class="field"><span class="field-name">Mock run length (ms)</span><input name="mockDurationMs" type="number" min="500" max="120000" step="500"></label>
         </div>
-        <div class="form-actions"><button type="submit" class="primary">Save subagents</button><button type="button" class="quiet" data-reset>Restore defaults</button><span class="dirty" hidden>Unsaved changes</span></div>
-      </form>
-      <form class="settings" data-section="boosker" id="form-boosker" hidden>
-        <label class="check"><input type="checkbox" name="enabled"> Run calls through the Boosker broker</label>
-        <span class="hint" id="boosker-source">Boosker mode is not set up on this server.</span>
-        <span class="hint">When on, a call uses the three texts below, Boosker's real dispatcher and real Claude sessions on this computer (they do real work, with the same permissions as a phone call). Voice, greeting, acknowledgement and hang-up settings still come from the Voice agent tab; its prompt, the Delegation agent and the Subagents tabs are not used. Changes apply to the next call.</span>
-        <label class="field grow">
-          <span class="field-name">Voice prompt <em class="differs" data-differs="voicePrompt" hidden>edited here</em></span>
-          <textarea name="voicePrompt" spellcheck="true" rows="14"></textarea>
-          <span class="hint">The agent prompt the phone sends when a call starts. This is the app's default for a new agent; an agent edited on the phone has its own text, which is stored only on the phone. Paste it here to test it.</span>
-        </label>
-        <label class="field">
-          <span class="field-name">Delegation paragraph <em class="differs" data-differs="delegationParagraph" hidden>edited here</em></span>
-          <textarea name="delegationParagraph" spellcheck="true" rows="7"></textarea>
-          <span class="hint">The broker adds this after the voice prompt on every call.</span>
-        </label>
-        <label class="field">
-          <span class="field-name">Dispatcher prompt <em class="differs" data-differs="dispatcherPrompt" hidden>edited here</em></span>
-          <textarea name="dispatcherPrompt" spellcheck="true" rows="14"></textarea>
-          <span class="hint">The dispatcher reads each delegated request and answers with actions: start a session, send to one, stop one, run a lookup, or say something.</span>
-        </label>
-        <div class="row">
-          <label class="field"><span class="field-name">Wait for transcript (ms)</span><input name="graceMs" type="number" min="0" max="5000" step="100"></label>
-        </div>
-        <span class="hint">An edit here is used for test calls only. To make it Boosker's, change the Boosker code and deploy it. Other broker rules (progress every 3 s, the 1200-character spoken limit, stop and status phrases) are read from the Boosker folder when this server starts.</span>
-        <div class="form-actions"><button type="submit" class="primary">Save Boosker mode</button><button type="button" class="quiet" data-reset>Reload from the Boosker folder</button><span class="dirty" hidden>Unsaved changes</span></div>
+        <div class="form-actions"><button type="submit" class="primary">Save subagents</button><button type="button" class="quiet" data-reset data-boosker="Reload from Boosker">Restore defaults</button><span class="dirty" hidden>Unsaved changes</span></div>
       </form>
       <datalist id="models"></datalist>
     </section>
 
-    <!-- Center: conversation thread and the composer -->
-    <section class="panel center" aria-label="Conversation">
+    <!-- Center: the call log (grouped by call and by request) and the composer -->
+    <section class="panel center" aria-label="Call log">
+      <div class="log-bar">
+        <label class="check small" title="Show only the requests and rows that have an error"><input type="checkbox" id="log-errors"> Errors only</label>
+        <label class="check small" title="Also show sounds with no words, saved settings and other low-level rows"><input type="checkbox" id="log-everything"> All rows</label>
+        <span class="log-bar-end">
+          <a id="btn-export" class="quiet button small" href="/api/export" download title="Download every event of this run as JSON">Export</a>
+          <button id="btn-reset" type="button" class="small" title="Empty the log. A call in progress is kept. Nothing is deleted from data/runs.">Clear log</button>
+        </span>
+      </div>
       <div class="thread" id="thread" aria-live="polite">
         <div class="empty" id="thread-empty">
           <p class="empty-title">Start a call and talk.</p>
-          <p>Your speech, Kit's replies, each delegation, the orchestrator's decisions and every subagent show up here in order. Ask for something that needs a lookup, like "what's the weather in Boston right now", to see a delegation.</p>
-          <p>No microphone handy? Send a typed request below; it goes straight to the orchestrator.</p>
+          <p>Each call gets a block here: its Claude sessions at the top, then your speech and Kit's replies in order, and one block per request with every step it caused. Ask for something that needs a lookup, like "what's the weather in Boston right now", to see a request.</p>
+          <p>No microphone handy? Send a typed request from the composer below; it goes straight to the orchestrator.</p>
         </div>
       </div>
       <form class="composer" id="composer">
-        <div class="composer-modes seg" role="tablist">
-          <button type="button" role="tab" data-mode="inject" aria-selected="true">Send to GPT-Live</button>
-          <button type="button" role="tab" data-mode="typed" aria-selected="false">Typed request</button>
+        <div class="composer-top">
+          <div class="composer-modes seg" role="tablist">
+            <button type="button" role="tab" data-mode="inject" aria-selected="true">Send to GPT-Live</button>
+            <button type="button" role="tab" data-mode="typed" aria-selected="false">Typed request</button>
+          </div>
+          <button type="button" class="quiet small" id="btn-composer" aria-expanded="true" aria-controls="composer">Hide composer</button>
         </div>
         <div class="composer-body" data-mode="inject">
           <div class="kinds" role="radiogroup" aria-label="Event type">

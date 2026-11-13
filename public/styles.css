@@ -71,7 +71,7 @@ button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color:
 .status[data-state="live"]::before { background: var(--subagent); box-shadow: 0 0 0 4px rgb(18 127 111 / 0.18); }
 .status[data-state="error"] { color: var(--error); }
 .status[data-state="error"]::before { background: var(--error); }
-.clock { color: var(--muted); }
+.clock { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .meters { display: inline-flex; gap: 12px; }
 .meter { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 .meter-track { width: 64px; height: 6px; background: var(--rule-soft); border-radius: 3px; overflow: hidden; }
@@ -122,7 +122,7 @@ button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color:
 .dirty { font-size: 12px; color: var(--orchestrator-ink); font-weight: 600; }
 
 /* Conversation thread */
-.thread { flex: 1; overflow-y: auto; padding: 18px 22px 24px; display: flex; flex-direction: column; gap: 10px; }
+.thread { flex: 1; overflow-y: auto; padding: 14px 18px 24px; display: flex; flex-direction: column; gap: 12px; container-type: inline-size; }
 .empty { margin: auto; max-width: 46ch; color: var(--muted); }
 .empty-title { font-size: 18px; font-weight: 600; color: var(--ink); margin-bottom: 4px; }
 .empty p { margin: 0 0 10px; }
@@ -137,45 +137,90 @@ button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color:
 .turn.assistant .who { color: var(--voice); }
 .turn.typed .said { font-style: italic; }
 
-/* Pipeline rows: smaller, indented, colored by the sending lane */
-.step { margin-left: 22px; max-width: 72ch; font-size: 13px; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
-.step .route { font-weight: 600; white-space: nowrap; }
-.step .body { color: var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; }
-.step .meta { grid-column: 2; font-size: 12px; color: var(--muted); }
-.step.from-user .route { color: var(--user); }
-.step.from-client .route { color: var(--client); }
-.step.from-voice .route { color: var(--voice); }
-.step.from-orchestrator .route { color: var(--orchestrator-ink); }
-.step.from-subagent .route { color: var(--subagent); }
-.step.manual .route::after { content: "you"; margin-left: 6px; font-size: 11px; font-weight: 600; color: #fff; background: var(--ink); border-radius: 3px; padding: 0 5px; }
-.step.error .route, .step.error .body { color: var(--error); }
-.step.dim { opacity: 0.65; }
-.step details { grid-column: 1 / -1; }
-.step summary { cursor: pointer; color: var(--muted); font-size: 12px; }
-.step pre { margin: 4px 0 0; padding: 8px 10px; background: var(--panel); border: 1px solid var(--rule-soft); border-radius: var(--radius-s); font: 12px/1.45 var(--mono); white-space: pre-wrap; max-height: 260px; overflow: auto; }
-.divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 6px 0; }
-.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+/* The call log (log.js). A call is a block; inside it, its Claude sessions,
+   speech in order, and one block per request with the steps it caused. */
+.log-bar { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; padding: 5px 10px; border-bottom: 1px solid var(--rule); background: var(--panel); }
+.log-bar-end { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
+.log-bar button, .log-bar .button { padding: 4px 10px; }
+.thread:not(.show-low) .low { display: none; }
+.thread.only-errors .turn, .thread.only-errors .sessions, .thread.only-errors .req:not(.has-error),
+.thread.only-errors .call-block:not(.has-error), .thread.only-errors .notes .st:not(.error) { display: none; }
 
-/* Subagent cards: the one boxed element in the thread, since a subagent is a
-   thing with state, not a message. */
-.agent { margin-left: 22px; max-width: 72ch; border: 1px solid var(--rule); border-left: 4px solid var(--subagent); border-radius: var(--radius-m); padding: 10px 12px; background: #fbfdfc; display: flex; flex-direction: column; gap: 6px; }
-.agent-head { display: flex; align-items: baseline; gap: 8px; }
-.agent-id { font-weight: 700; color: var(--subagent); }
-.agent-title { font-weight: 600; flex: 1; min-width: 0; }
-.agent-state { font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: 10px; background: var(--rule-soft); color: var(--muted); }
-.agent[data-status="running"] .agent-state { background: rgb(18 127 111 / 0.14); color: var(--subagent); }
-.agent[data-status="done"] .agent-state { background: var(--subagent); color: #fff; }
-.agent[data-status="failed"] .agent-state { background: var(--error); color: #fff; }
-.agent-task { font-size: 13px; color: var(--muted); }
-.agent-progress { margin: 0; padding: 0 0 0 16px; font-size: 13px; color: var(--muted); }
-.agent-progress li:last-child { color: var(--ink); }
-.agent-draft { font-size: 13px; color: var(--muted); font-style: italic; white-space: pre-wrap; }
-.agent-result { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.agent-stop { align-self: flex-start; font-size: 12px; padding: 3px 9px; }
+.call-block { border: 1px solid var(--rule); border-radius: var(--radius-m); background: var(--sheet); }
+.call-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 8px 12px; cursor: pointer; background: var(--panel); border-radius: var(--radius-m); font-size: 13px; color: var(--muted); }
+.call-block[open] > .call-head { border-bottom: 1px solid var(--rule-soft); border-radius: var(--radius-m) var(--radius-m) 0 0; }
+.call-name { font-weight: 700; color: var(--ink); }
+.call-block[data-state="live"] .call-state { color: var(--subagent); font-weight: 600; }
+.call-counts { margin-left: auto; }
+.call-counts.error { color: var(--error); font-weight: 600; }
+.call-body, .loose { display: flex; flex-direction: column; gap: 10px; }
+.call-body { padding: 10px 12px 12px; }
+
+/* The Claude sessions of a call: the dispatcher's own, then each agent session. */
+.sessions { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rule-soft); border-radius: var(--radius-s); background: #fbfdfc; font-size: 13px; }
+.sess { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 6px 10px; }
+.sess + .sess { border-top: 1px solid var(--rule-soft); }
+.sess-id { font-weight: 700; color: var(--subagent); }
+.sess[data-kind="dispatcher"] .sess-id { color: var(--orchestrator-ink); }
+.sess-title { flex: 1 1 150px; min-width: 0; overflow-wrap: anywhere; }
+.sess-state { font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: 10px; background: var(--rule-soft); color: var(--muted); white-space: nowrap; }
+.sess[data-status="running"] .sess-state { background: rgb(18 127 111 / 0.14); color: var(--subagent); }
+.sess[data-status="done"] .sess-state { background: var(--subagent); color: #fff; }
+.sess[data-status="failed"] .sess-state { background: var(--error); color: #fff; }
+.sess-open { font-size: 12px; font-weight: 600; color: var(--user); white-space: nowrap; }
+.sess-stop { font-size: 12px; padding: 1px 8px; }
+.sess-more { flex-basis: 100%; font-size: 12px; }
+.sess-more summary, .st details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.sess-more dl { margin: 4px 0 2px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; }
+.sess-more dt { color: var(--muted); }
+.sess-more dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+
+/* One request and its steps. */
+.req { border: 1px solid var(--rule); border-left: 4px solid var(--orchestrator); border-radius: var(--radius-m); background: #fffdf8; }
+.req.has-error { border-left-color: var(--error); }
+.req-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 7px 10px; cursor: pointer; font-size: 13px; }
+.req-name { font-weight: 700; color: var(--orchestrator-ink); }
+.req-head time { color: var(--muted); font-size: 12px; }
+.req-said { flex: 1 1 180px; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.req-outcome { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.chip { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 10px; background: var(--rule-soft); color: var(--muted); }
+.chip.error { background: var(--error); color: #fff; }
+.steps { list-style: none; margin: 0; padding: 0 10px 6px; display: flex; flex-direction: column; }
+.steps.notes { padding: 0; }
+.st { display: grid; grid-template-columns: 50px 132px minmax(0, 1fr); gap: 0 8px; align-items: baseline; padding: 4px 0; font-size: 13px; border-top: 1px solid var(--rule-soft); }
+.notes .st:first-child { border-top: 0; }
+.st-t { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.st-who { font-size: 12px; font-weight: 600; color: var(--client); overflow-wrap: anywhere; }
+.st.tone-user .st-who { color: var(--user); }
+.st.tone-voice .st-who { color: var(--voice); }
+.st.tone-orchestrator .st-who { color: var(--orchestrator-ink); }
+.st.tone-subagent .st-who { color: var(--subagent); }
+.st-who .you { margin-left: 6px; font-size: 11px; color: #fff; background: var(--ink); border-radius: 3px; padding: 0 5px; }
+.st-body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.st-words { white-space: pre-wrap; overflow-wrap: anywhere; }
+.st-words.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.st-words.clamp.open { -webkit-line-clamp: unset; }
+.pill { font-size: 11px; font-weight: 700; padding: 0 5px; border-radius: 3px; border: 1px solid currentColor; margin-left: 6px; color: var(--muted); white-space: nowrap; }
+.st-meta { font-size: 12px; color: var(--muted); }
+.st-meta:empty { display: none; }
+.st.error .st-who, .st.error .st-words, .st.error .pill { color: var(--error); }
+.st.dim { opacity: 0.65; }
+.st.draft .st-words { font-style: italic; color: var(--muted); }
+.st pre { margin: 4px 0 0; padding: 8px 10px; background: var(--panel); border: 1px solid var(--rule-soft); border-radius: var(--radius-s); font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+.st details ol { margin: 4px 0 0; padding: 0 0 0 18px; font-size: 12px; color: var(--muted); max-height: 260px; overflow: auto; }
+/* In a narrow log a step is two lines: time and sender, then the text under them. */
+@container (max-width: 640px) {
+  .st { grid-template-columns: auto minmax(0, 1fr); }
+  .st-body { grid-column: 1 / -1; }
+}
 
 /* Composer */
 .composer { border-top: 1px solid var(--rule); background: var(--panel); padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.composer-modes { align-self: flex-start; }
+.composer-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* Folded: only the button that brings it back, and the note line. */
+.composer.folded { padding-top: 4px; padding-bottom: 4px; gap: 0; }
+.composer.folded > .composer-body, .composer.folded .composer-modes { display: none; }
+.composer.folded .composer-top { justify-content: flex-end; }
 .composer-modes button { flex: none; padding: 5px 12px; }
 .composer-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .inject-row, .presets { min-width: 0; }
@@ -315,10 +360,11 @@ button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color:
   .bench { display: block; position: relative; }
   .bench .panel { display: none; height: 100%; border-right: 0; }
   .bench[data-show="left"] .left, .bench[data-show="center"] .center, .bench[data-show="right"] .right { display: flex; }
-  .thread { padding: 14px; }
-  .step, .agent { margin-left: 10px; }
+  .call { flex-wrap: wrap; gap: 2px 10px; }
+  .clock { flex-basis: 100%; font-size: 12px; }
+  .thread { padding: 10px; }
+  .call-body { padding: 8px; }
   .field.grow textarea { min-height: 220px; }
-  .actions .quiet { display: none; }
   .composer { gap: 6px; padding: 8px 10px 10px; }
   .kinds { flex-wrap: nowrap; }
   .kinds label { min-width: 0; }
@@ -331,7 +377,13 @@ button[aria-pressed="true"] { background: var(--ink); color: #fff; border-color:
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .timeline:not(.show-quiet) .ev[data-quiet] { display: none; }
 
-/* Boosker mode */
-.mode-chip { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--orchestrator); color: var(--orchestrator); white-space: nowrap; }
-.mode-chip.error { border-color: var(--error); color: var(--error); }
+/* Boosker mode: the switch in the top bar, the note under the tabs, and the
+   settings a Boosker call does not use. */
+.mode-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid var(--rule); color: var(--muted); white-space: nowrap; cursor: pointer; }
+.mode-switch:has(input:checked) { border-color: var(--orchestrator); color: var(--orchestrator); }
+.mode-switch:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
+.mode-switch.error { border-color: var(--error); color: var(--error); }
+.mode-switch input { margin: 0; accent-color: var(--orchestrator); }
+.boosker-note { margin: 8px 0 0; padding: 8px 10px; border-left: 3px solid var(--orchestrator); background: var(--sheet); }
 .differs { font-style: normal; font-weight: 500; font-size: 12px; color: var(--orchestrator); margin-left: 6px; }
+.settings label.unused { opacity: 0.45; }
